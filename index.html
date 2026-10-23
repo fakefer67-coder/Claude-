@@ -197,7 +197,7 @@
     .vbar .vt .n { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .vbar .vt .c { font-size: 12px; opacity: .65; }
     .vbtn { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; }
-    .vact { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 11px; min-width: 60px; padding: 4px; color: #e9e6f0; }
+    .vact { display: flex; flex-direction: column; align-items: center; gap: 3px; font-size: 11px; min-width: 56px; padding: 4px; color: #e9e6f0; }
     .vact:disabled { opacity: .35; }
     .vact.del { color: #ff8a8d; }
     .stage { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
@@ -247,6 +247,7 @@
     .row svg.i { color: var(--accent); }
     .row.danger svg.i { color: var(--danger); }
     .row .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .menu-note { text-align: center; margin: -6px 8px 14px; }
     .menu-cancel { display: block; width: 100%; margin-top: 10px; padding: 14px; border-radius: 14px; background: var(--card-2); color: var(--accent-2); font-weight: 700; font-size: 17px; }
     .radio { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--muted); flex: none; transition: border .15s; }
     .row[aria-checked="true"] .radio { border: 7px solid var(--accent); }
@@ -436,6 +437,7 @@
     <div id="stage" class="stage"></div>
     <div class="vbar bottom">
       <button id="vShare" class="vact"><svg class="i" viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>Guardar</button>
+      <button id="vQuality" class="vact" hidden><svg class="i" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM8 5v14M16 5v14M4 9h4M4 15h4M16 9h4M16 15h4"/></svg>Calidad</button>
       <button id="vMove" class="vact"><svg class="i" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM10 13h6M13 10l3 3-3 3"/></svg>Mover</button>
       <button id="vRename" class="vact"><svg class="i" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4zM13 7l4 4"/></svg>Renombrar</button>
       <button id="vDelete" class="vact del"><svg class="i" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>Eliminar</button>
@@ -528,7 +530,18 @@
       <button class="row" role="radio" data-q="balanced"><span class="radio"></span><span class="grow">Equilibrado (recomendado)<span class="sub">Hasta 2560 px · nitidez de pantalla de iPhone, mucho ahorro</span></span></button>
       <button class="row" role="radio" data-q="original"><span class="radio"></span><span class="grow">Original<span class="sub">Las fotos no se tocan · solo compresión sin pérdidas</span></span></button>
     </div>
-    <p class="note">Cualquier tipo de archivo vale: textos, JSON, PDF, Word, ZIP… Los documentos y textos se comprimen sin perder ni un dato. Los vídeos se guardan tal cual (ya vienen comprimidos).</p>
+    <p class="note">Cualquier tipo de archivo vale: textos, JSON, PDF, Word, ZIP… Los documentos y textos se comprimen sin perder ni un dato.</p>
+
+    <h3>Calidad de los vídeos</h3>
+    <div class="group" role="radiogroup" id="videoGroup">
+      <button class="row" role="radio" data-vq="ask"><span class="radio"></span><span class="grow">Preguntar cada vez<span class="sub">Al añadir vídeos eliges la calidad y ves cuánto ocupará</span></span></button>
+      <button class="row" role="radio" data-vq="original"><span class="radio"></span><span class="grow">Original<span class="sub">No se tocan · máxima calidad, ocupan más</span></span></button>
+      <button class="row" role="radio" data-vq="1080"><span class="radio"></span><span class="grow">Alta · 1080p<span class="sub">Nítido de sobra en el móvil · mucho menos que un 4K</span></span></button>
+      <button class="row" role="radio" data-vq="720"><span class="radio"></span><span class="grow">Media · 720p<span class="sub">Se ve muy bien en el móvil · gran ahorro</span></span></button>
+      <button class="row" role="radio" data-vq="480"><span class="radio"></span><span class="grow">Ahorro · 480p<span class="sub">Ocupa muy poco · se nota en pantallas grandes</span></span></button>
+    </div>
+    <p class="note">Comprimir un vídeo tarda más o menos lo que dura y necesita la app abierta (si sales, sigue al volver). Se guarda solo la versión comprimida. Para cambiar la calidad de un vídeo ya guardado, ábrelo y toca «Calidad».</p>
+    <p class="note" id="videoSupport"></p>
 
     <h3>Espacio</h3>
     <div class="group">
@@ -555,6 +568,7 @@
   <dialog id="menu" class="sheet menu">
     <div class="grabber"></div>
     <h2 id="menuTitle"></h2>
+    <p id="menuNote" class="note menu-note" hidden></p>
     <div id="menuList" class="group"></div>
     <button id="menuCancel" class="menu-cancel">Cancelar</button>
   </dialog>

@@ -1,6 +1,6 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v3';
+const CACHE = 'baul-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -9,6 +9,7 @@ const ASSETS = [
   './icons/icon-180.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './vendor/mediabunny-1.61.3.min.mjs',
 ];
 
 self.addEventListener('install', e => {

@@ -11,7 +11,7 @@ Todo se queda dentro del iPhone: no se sube nada a ningún servidor.
 - **Compresión automática**:
   - Fotos: se optimizan a la resolución de la pantalla del iPhone (2560 px, calidad 82 %). Se ven nítidas y ocupan un 70–90 % menos. En Ajustes puedes elegir *Ahorro máximo* o *Original*.
   - Documentos y textos: compresión **sin pérdidas** (gzip). Al abrirlos son idénticos al original.
-  - Vídeos: se guardan tal cual (ya vienen comprimidos por el iPhone).
+  - Vídeos: el iPhone ya los graba comprimidos, así que sin perder calidad no se pueden reducir más. Lo que sí puedes es **elegir la calidad**: al añadir un vídeo la app pregunta (Original, Alta 1080p, Media 720p o Ahorro 480p) y muestra cuánto ocupará cada opción; también puedes fijar una calidad por defecto en Ajustes o cambiar la de un vídeo ya guardado con el botón *Calidad* del visor. Se recodifica en el propio iPhone (HEVC o H.264 por hardware) y el audio se conserva tal cual. Tarda más o menos lo que dura el vídeo y necesita la app abierta (si sales, sigue al volver). Se guarda solo la versión comprimida.
   - Las fotos con transparencia y los GIF animados no se tocan.
 - **Código de acceso con candado animado**: al abrirla pide un código de 6 números; al acertarlo, el candado se abre y entras al baúl. Todo se guarda cifrado (AES-256) con él, incluidos los nombres de archivos y carpetas. Se bloquea sola al salir (al momento, tras 1 minuto o tras 5, a elegir) y con el candado de arriba. Tras 5 intentos fallidos hay que esperar. Si olvidas el código, los archivos no se pueden recuperar: solo queda borrar el baúl y empezar de cero.
 - **Visor**: fotos con pellizcar/doble toque para ampliar, deslizar para pasar y hacia abajo para cerrar; vídeos, audio, PDF y textos.
@@ -43,9 +43,10 @@ La app es una web instalable (PWA): se publica una vez y se instala desde Safari
 | `app.js` | Compresión, cifrado, código de acceso, almacenamiento (IndexedDB), visor, compartir y copias de seguridad |
 | `sw.js` | Guarda la app en el iPhone para que abra sin internet |
 | `manifest.webmanifest`, `icons/` | Nombre e icono al instalarla |
+| `vendor/mediabunny-1.61.3.min.mjs` | [Mediabunny](https://github.com/Vanilagy/mediabunny) 1.61.3 (MPL-2.0, sin modificar; licencia en `vendor/mediabunny-LICENSE.txt`) para recodificar vídeos |
 
 Requisitos: iOS 16.4 o superior (para la compresión sin pérdidas; en versiones anteriores funciona pero sin comprimir documentos).
 
-Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v4`). La app instalada se actualiza sola la próxima vez que se abre con internet.
+Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v5`). La app instalada se actualiza sola la próxima vez que se abre con internet.
 
 > El icono de la pantalla de inicio lo guarda iOS al instalar la app. Para ver un icono nuevo hay que quitar el Baúl de la pantalla de inicio y volver a añadirlo, y **quitarlo borra sus archivos**: exporta antes una copia de seguridad y restáurala después.

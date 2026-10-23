@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 /* ================= Utilidades ================= */
 
@@ -41,6 +41,7 @@ const ICON = {
   move: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM10 13h6M13 10l3 3-3 3',
   pencil: 'M4 20h4L19 9l-4-4L4 16v4zM13 7l4 4',
   trash: 'M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3',
+  film: 'M4 5h16v14H4zM8 5v14M16 5v14M4 9h4M4 15h4M16 9h4M16 15h4',
 };
 function svgIcon(d) {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -477,6 +478,204 @@ async function optimizeContent(file, meta) {
   return r;
 }
 
+/* ================= Vídeos: elegir la calidad ================= */
+// Los vídeos del iPhone ya vienen comprimidos: solo ocupan menos si se vuelven a codificar con menos
+// resolución. Se hace en el propio dispositivo (WebCodecs, con su códec por hardware) y el audio se copia tal cual.
+
+const VIDEO_LIB = './vendor/mediabunny-1.61.3.min.mjs';
+const VIDEO_PRESETS = [
+  { key: '1080', label: 'Alta', res: '1080p', short: 1080, efficient: 6e6, standard: 9e6 },
+  { key: '720', label: 'Media', res: '720p', short: 720, efficient: 3e6, standard: 4.5e6 },
+  { key: '480', label: 'Ahorro', res: '480p', short: 480, efficient: 1.2e6, standard: 2e6 },
+];
+const videoPreset = key => VIDEO_PRESETS.find(p => p.key === key);
+const CODEC_NAMES = { hevc: 'HEVC (H.265)', avc: 'H.264', vp9: 'VP9', av1: 'AV1' };
+const resolutionLabel = short => (short >= 2160 ? '4K' : short >= 1440 ? '2K' : `${short}p`);
+
+let videoPref = prefs.get('baul.videoq', 'ask');
+if (videoPref !== 'ask' && videoPref !== 'original' && !videoPreset(videoPref)) videoPref = 'ask';
+
+let mediaLib;
+const loadMediaLib = () => (mediaLib ??= import(VIDEO_LIB));
+let encoderCodec;
+// Códec con el que este dispositivo puede codificar vídeo (null si ninguno).
+function videoEncoderCodec() {
+  encoderCodec ??= (async () => {
+    if (typeof VideoEncoder !== 'function') return null;
+    try {
+      const mb = await loadMediaLib();
+      return await mb.getFirstEncodableVideoCodec(['hevc', 'avc', 'vp9', 'av1'], { width: 1920, height: 1080, bitrate: 6e6 });
+    } catch {
+      return null;
+    }
+  })();
+  return encoderCodec;
+}
+// HEVC y AV1 necesitan menos bits que H.264 y VP9 para la misma calidad; 60 fps, algo más.
+const presetBitrate = (preset, codec, fps = 30) =>
+  (codec === 'hevc' || codec === 'av1' ? preset.efficient : preset.standard) * (fps > 40 ? 1.4 : 1);
+
+async function probeVideo(file) {
+  const mb = await loadMediaLib();
+  const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    return track ? { w: track.displayWidth, h: track.displayHeight, duration: await input.computeDuration(), size: file.size } : null;
+  } finally {
+    input.dispose();
+  }
+}
+
+// Se lanza cuando la compresión de un vídeo se corta (app en segundo plano o bloqueada): se reintenta al volver.
+class Interrupted extends Error {}
+let activeConversion = null;
+let conversionCancelled = false;
+function interruptVideo() {
+  if (!activeConversion) return;
+  conversionCancelled = true;
+  activeConversion.cancel().catch(() => {});
+}
+
+// Devuelve el vídeo recodificado, o null si no se puede o no merece la pena.
+async function transcodeVideo(file, presetKey, onProgress) {
+  const preset = videoPreset(presetKey);
+  const codec = await videoEncoderCodec();
+  if (!preset || !codec) return null;
+  const mb = await loadMediaLib();
+  const input = new mb.Input({ source: new mb.BlobSource(file), formats: mb.ALL_FORMATS });
+  try {
+    const track = await input.getPrimaryVideoTrack();
+    if (!track) return null;
+    const w = track.displayWidth;
+    const h = track.displayHeight;
+    const stats = await track.computePacketStats(120);
+    const bitrate = presetBitrate(preset, codec, stats.averagePacketRate);
+    const scale = Math.min(1, preset.short / Math.min(w, h));
+    // Ya es de esta calidad o menos: no merece la pena volver a codificarlo.
+    if (scale === 1 && stats.averageBitrate <= bitrate * 1.2) return null;
+    const even = n => Math.max(2, Math.round(n / 2) * 2);
+    // Solo se fija el lado corto; el otro sale de la proporción del vídeo (también si está girado).
+    const shortSide = w <= h ? { width: even(w * scale) } : { height: even(h * scale) };
+    const output = new mb.Output({ format: new mb.Mp4OutputFormat({ fastStart: 'in-memory' }), target: new mb.BufferTarget() });
+    const conversion = await mb.Conversion.init({
+      input, output, tracks: 'primary', showWarnings: false,
+      video: { ...shortSide, codec, quality: new mb.Quality({ bitrate }), forceTranscode: true },
+    });
+    // Si el audio o el vídeo no se pudieran conservar, mejor dejarlo como está.
+    if (!conversion.isValid || conversion.discardedTracks.some(d => d.track.type === 'audio' || d.track.type === 'video')) return null;
+    conversion.onProgress = p => onProgress?.(p);
+    conversionCancelled = false;
+    activeConversion = conversion;
+    try {
+      await conversion.execute();
+    } catch (err) {
+      if (conversionCancelled) throw new Interrupted('Compresión de vídeo interrumpida');
+      throw err;
+    } finally {
+      activeConversion = null;
+    }
+    return { blob: new Blob([output.target.buffer], { type: 'video/mp4' }), w: even(w * scale), h: even(h * scale) };
+  } finally {
+    input.dispose();
+  }
+}
+
+let videoJob = null;
+async function compressVideoStep(r, meta) {
+  videoJob = { progress: 0 };
+  updateActivity();
+  // Que la pantalla no se apague mientras tanto (el iPhone pausaría la app).
+  const wake = await navigator.wakeLock?.request('screen').catch(() => null);
+  try {
+    const out = await transcodeVideo(r.content, meta.vq, p => { videoJob.progress = p; activitySoon(); });
+    if (out && out.blob.size < r.content.size * 0.9) {
+      Object.assign(r, { content: out.blob, stored: out.blob, enc: 'raw', type: 'video/mp4', w: out.w, h: out.h, vcompressed: meta.vq });
+      r.name = meta.name.replace(/\.[^./]+$/, '') + '.mp4';
+    } else if (!out && !(await videoEncoderCodec())) {
+      toast('Este dispositivo no permite comprimir vídeos: se quedan en su calidad original');
+    }
+  } catch (err) {
+    if (err instanceof Interrupted) throw err;
+    console.error(err);
+    toast(`No se pudo comprimir «${meta.name}»: se queda en su calidad original`);
+  } finally {
+    videoJob = null;
+    wake?.release().catch(() => {});
+    updateActivity();
+  }
+}
+
+// Menú para elegir la calidad. `infos`: [{ size, duration, w, h }] de cada vídeo.
+async function chooseVideoQuality(infos, { recompress = false } = {}) {
+  const codec = await videoEncoderCodec();
+  if (!codec) {
+    toast('Este dispositivo no permite comprimir vídeos: se guardan en calidad original');
+    return recompress ? undefined : 'original';
+  }
+  const size = infos.reduce((s, v) => s + (v.size || 0), 0);
+  const known = infos.every(v => v.duration > 0);
+  const duration = infos.reduce((s, v) => s + (v.duration || 0), 0);
+  const shortSide = Math.max(0, ...infos.map(v => Math.min(v.w || 0, v.h || 0)));
+  const options = [];
+  if (!recompress) options.push({ label: 'Original', sub: `Sin tocar · ${fmtBytes(size)}`, value: 'original', icon: ICON.film });
+  for (const p of VIDEO_PRESETS) {
+    let sub = '';
+    if (known && size) {
+      const est = Math.min(size, ((presetBitrate(p, codec) + 160e3) * duration) / 8);
+      sub = est < size * 0.9 ? `≈ ${fmtBytes(est)} (${minusPct(size - est, size)})` : 'Ya ocupa poco: apenas cambiaría';
+    }
+    options.push({ label: `${p.label} · ${p.res}`, sub, value: p.key, icon: ICON.film });
+  }
+  const res = shortSide ? ` (${resolutionLabel(shortSide)})` : '';
+  const title = recompress
+    ? `Cambiar la calidad del vídeo${res}`
+    : infos.length === 1 ? `¿En qué calidad guardo el vídeo${res}?` : `¿En qué calidad guardo los ${infos.length} vídeos?`;
+  const note = recompress
+    ? 'La versión guardada se sustituye por la nueva. Tarda más o menos lo que dura el vídeo y necesita la app abierta.'
+    : 'Comprimir tarda más o menos lo que dura el vídeo y necesita la app abierta. Se guarda solo la versión elegida.';
+  return menu(title, options, note);
+}
+
+function setVideoQuality(m, value) {
+  delete m.batch;
+  if (videoPreset(value)) m.vq = value;
+  else delete m.vq;
+}
+
+async function applyVideoChoice(choice, value) {
+  choice.value = value;
+  for (const m of state.items) {
+    if (m.vq === 'ask' && m.batch === choice.id) {
+      setVideoQuality(m, value);
+      await saveMeta(m);
+    }
+  }
+  renderSoon();
+  runOptimizer();
+}
+
+async function askVideoQualityFor(files, choice) {
+  const infos = await Promise.all(files.map(f => probeVideo(f).catch(() => null)));
+  const value = await chooseVideoQuality(infos.map((info, i) => info || { size: files[i].size }));
+  // Si se bloqueó con la pregunta abierta, se vuelve a preguntar al desbloquear.
+  if (locked) return;
+  await applyVideoChoice(choice, value ?? 'original');
+}
+
+// Vídeos que se quedaron sin elegir calidad (se cerró la app antes de responder).
+async function askPendingVideoQuality() {
+  const waiting = state.items.filter(m => m.vq === 'ask');
+  if (!waiting.length) return;
+  const value = await chooseVideoQuality(waiting.map(m => ({ size: m.size, duration: m.duration, w: m.w, h: m.h })));
+  if (locked) return;
+  for (const m of waiting) {
+    setVideoQuality(m, value ?? 'original');
+    await saveMeta(m);
+  }
+  renderSoon();
+  runOptimizer();
+}
+
 /* ================= Guardar sin esperar ================= */
 // Paso 1 (rápido): cada archivo se cifra y se guarda tal cual nada más elegirlo.
 // Paso 2 (lento, en segundo plano): se comprime y se le hace la miniatura. Si se sale de la app o se
@@ -503,6 +702,11 @@ async function ingestList(files, opts) {
   for (const f of files) {
     try {
       const meta = await ingestOne(f, opts);
+      // La calidad se eligió mientras este vídeo se estaba guardando.
+      if (meta.vq === 'ask' && opts.videoChoice && opts.videoChoice.value !== 'ask') {
+        setVideoQuality(meta, opts.videoChoice.value);
+        await saveMeta(meta);
+      }
       if (!locked) { state.items.unshift(meta); renderSoon(); }
     } catch (err) {
       console.error(err);
@@ -523,13 +727,17 @@ async function ingestList(files, opts) {
   runOptimizer();
 }
 
-async function ingestOne(file, { keepOriginal = false, added, originalSize, folder = null } = {}) {
+async function ingestOne(file, { keepOriginal = false, added, originalSize, folder = null, videoChoice = null } = {}) {
   const type = mimeOf(file);
   const meta = {
     id: uid(), name: file.name || 'archivo', type, kind: kindOf(type, file.name),
     size: originalSize || file.size, outSize: file.size, storedSize: 0, enc: 'raw', status: 'raw',
     keep: keepOriginal, folder, added: added || Date.now(),
   };
+  if (meta.kind === 'video' && videoChoice) {
+    if (videoChoice.value === 'ask') { meta.vq = 'ask'; meta.batch = videoChoice.id; }
+    else setVideoQuality(meta, videoChoice.value);
+  }
   // Al cifrar se crea una copia propia: el archivo del selector de iOS es temporal.
   const sealed = await encryptBlob(file, masterKey);
   meta.storedSize = sealed.size;
@@ -543,13 +751,15 @@ async function runOptimizer() {
   updateActivity();
   try {
     while (!locked && masterKey) {
-      const next = state.items.find(m => m.status === 'raw');
+      // Primero lo rápido; los vídeos a comprimir, al final. Los que esperan a que se elija calidad, no.
+      const waiting = state.items.filter(m => m.status === 'raw' && m.vq !== 'ask');
+      const next = waiting.find(m => !videoPreset(m.vq)) || waiting[0];
       if (!next) break;
       try {
         await optimizeOne(next);
       } catch (err) {
+        if (err instanceof Interrupted || locked || !masterKey) break;
         console.error(err);
-        if (locked || !masterKey) break;
         // No se pudo optimizar: se queda guardado tal cual (si no se ha borrado mientras tanto).
         delete next.status;
         await dbReplaceIfExists(await sealMeta(next), null, null).catch(() => {});
@@ -568,6 +778,7 @@ async function optimizeOne(meta) {
   if (!raw) { state.items = state.items.filter(m => m !== meta); return; }
   const file = new File([await decryptBlob(raw, key, meta.type)], meta.name, { type: meta.type });
   const r = await optimizeContent(file, meta);
+  if (r.kind === 'video' && videoPreset(meta.vq)) await compressVideoStep(r, meta);
   const sealed = r.stored !== file ? await encryptBlob(r.stored, key) : null;
   const thumb = r.thumb ? await encryptBlob(r.thumb, key) : null;
   // Mezclar con los datos actuales: pudo renombrarse o moverse mientras tanto.
@@ -578,20 +789,38 @@ async function optimizeOne(meta) {
   };
   if (r.name !== meta.name && current.name === meta.name) updated.name = r.name;
   if (sealed) updated.storedSize = sealed.size;
+  if (thumb) updated.thumbReady = true;
+  if (r.vcompressed) updated.vcompressed = r.vcompressed;
   delete updated.status;
+  delete updated.vq;
+  delete updated.batch;
   if (!(await dbReplaceIfExists(await sealMeta(updated, key), sealed, thumb))) return;
   Object.assign(current, updated);
   delete current.status;
+  delete current.vq;
+}
+
+let activityQueued = false;
+function activitySoon() {
+  if (activityQueued) return;
+  activityQueued = true;
+  requestAnimationFrame(() => { activityQueued = false; updateActivity(); });
 }
 
 function updateActivity() {
   const box = $('#activity');
   const copying = isCopying();
-  const pending = locked ? 0 : state.items.filter(m => m.status === 'raw').length;
-  const show = !locked && (copying || pending > 0);
+  const pending = locked ? 0 : state.items.filter(m => m.status === 'raw' && m.vq !== 'ask').length;
+  const show = !locked && (copying || pending > 0 || !!videoJob);
   box.hidden = !show;
   if (!show) return;
-  if (copying) {
+  if (videoJob && !copying) {
+    const p = Math.round(videoJob.progress * 100);
+    box.classList.remove('indeterminate');
+    $('#actTitle').textContent = `Comprimiendo vídeo · ${p} %${pending > 1 ? ` · quedan ${pending - 1}` : ''}`;
+    $('#actSub').textContent = 'Mantén la app abierta. Si sales, seguirá al volver';
+    $('#actBar').style.width = `${p}%`;
+  } else if (copying) {
     box.classList.remove('indeterminate');
     $('#actTitle').textContent = queue.total > 1 ? `Guardando ${Math.min(queue.done + 1, queue.total)} de ${queue.total}…` : 'Guardando…';
     $('#actSub').textContent = 'Si sales de la app, seguirá al volver';
@@ -897,7 +1126,7 @@ function fileTile(m) {
   tile.dataset.id = m.id;
   tile.setAttribute('aria-label', m.name);
   const pending = m.status === 'raw';
-  if (!pending && (m.kind === 'image' || m.kind === 'video')) {
+  if ((!pending || m.thumbReady) && (m.kind === 'image' || m.kind === 'video')) {
     const img = el('img');
     img.alt = '';
     img.decoding = 'async';
@@ -1075,7 +1304,7 @@ function ask({ title, message = '', input = null, placeholder = '', ok = 'Acepta
 
 // Menú en hoja inferior. Devuelve el `value` elegido o undefined.
 let menuCancel = null;
-function menu(title, options) {
+function menu(title, options, note = '') {
   return new Promise(resolve => {
     const d = $('#menu');
     const close = value => {
@@ -1085,13 +1314,18 @@ function menu(title, options) {
       resolve(value);
     };
     $('#menuTitle').textContent = title;
+    $('#menuNote').textContent = note;
+    $('#menuNote').hidden = !note;
     const list = $('#menuList');
     list.replaceChildren();
     for (const o of options) {
       const b = el('button', 'row' + (o.danger ? ' danger' : ''));
       b.style.paddingLeft = `${14 + (o.depth || 0) * 20}px`;
       if (o.icon) b.append(svgIcon(o.icon));
-      b.append(el('span', 'grow label', o.label));
+      const text = el('span', 'grow');
+      text.append(el('span', 'label', o.label));
+      if (o.sub) text.append(el('span', 'sub', o.sub));
+      b.append(text);
       b.onclick = () => close(o.value);
       list.append(b);
     }
@@ -1168,7 +1402,10 @@ $('#fileInput').addEventListener('change', e => {
   const folder = pickTarget !== undefined ? pickTarget : state.folder;
   pickTarget = undefined;
   if (!files.length || locked) return;
-  addFiles(files, { folder });
+  const videos = files.filter(f => kindOf(mimeOf(f), f.name) === 'video');
+  const videoChoice = videos.length ? { id: uid(), value: videoPref } : null;
+  addFiles(files, { folder, videoChoice });
+  if (videoChoice?.value === 'ask') askVideoQualityFor(videos, videoChoice);
   window.scrollTo({ top: 0, behavior: 'smooth' });
 });
 
@@ -1375,6 +1612,7 @@ async function showItem(index) {
   $('#vName').textContent = meta.name;
   $('#vCount').textContent = view.list.length > 1 ? `${index + 1} de ${view.list.length}` : '';
   $('#vShare').disabled = true;
+  $('#vQuality').hidden = meta.kind !== 'video';
   zoom.el = null;
   resetZoom(false);
   stage.replaceChildren(el('div', 'spinner'));
@@ -1476,6 +1714,18 @@ function otherView(meta, file) {
 
 $('#vClose').addEventListener('click', closeViewer);
 $('#vShare').addEventListener('click', () => { if (view.file) shareFiles([view.file]); });
+$('#vQuality').addEventListener('click', async () => {
+  const meta = view.list[view.index];
+  if (!meta || meta.kind !== 'video') return;
+  if (meta.status === 'raw') { toast('Este vídeo ya se está procesando'); return; }
+  const value = await chooseVideoQuality([{ size: meta.outSize, duration: meta.duration, w: meta.w, h: meta.h }], { recompress: true });
+  if (!value || locked) return;
+  Object.assign(meta, { vq: value, status: 'raw', thumbReady: true });
+  await saveMeta(meta);
+  toast('Comprimiendo el vídeo… puedes seguir usando la app');
+  renderSoon();
+  runOptimizer();
+});
 $('#vMove').addEventListener('click', () => {
   const meta = view.list[view.index];
   if (meta) moveEntries([meta.id], []);
@@ -1515,7 +1765,11 @@ $('#vInfo').addEventListener('click', () => {
   ];
   if (m.w && m.h) rows.push(['Medidas', `${m.w} × ${m.h} px`]);
   if (m.duration) rows.push(['Duración', fmtDur(m.duration)]);
-  rows.push(['Compresión', m.status === 'raw' ? 'Comprimiendo…' : m.reencoded ? 'Foto optimizada' : m.enc === 'gzip' ? 'Sin pérdidas' : 'Guardado tal cual']);
+  if (m.kind === 'video') {
+    const p = videoPreset(m.vcompressed);
+    rows.push(['Calidad', videoPreset(m.vq) ? 'Comprimiendo…' : p ? `${p.label} · ${p.res}` : 'Original']);
+  }
+  rows.push(['Compresión', m.status === 'raw' ? 'Comprimiendo…' : m.vcompressed ? 'Vídeo recomprimido' : m.reencoded ? 'Foto optimizada' : m.enc === 'gzip' ? 'Sin pérdidas' : 'Guardado tal cual']);
   rows.push(['Cifrado', 'AES-256']);
   rows.push(['Añadido', fmtDate(m.added)]);
   const table = el('table');
@@ -1668,6 +1922,12 @@ function renderQuality() {
     b.setAttribute('aria-checked', String(b.dataset.q === quality));
   }
 }
+function renderVideoPref() {
+  for (const b of document.querySelectorAll('#videoGroup .row')) {
+    b.setAttribute('aria-checked', String(b.dataset.vq === videoPref));
+  }
+}
+
 function renderAutoLock() {
   const current = prefs.get('baul.autolock', '60');
   for (const b of document.querySelectorAll('#autoLockGroup .row')) {
@@ -1692,8 +1952,14 @@ async function renderStorage() {
 
 $('#settingsBtn').addEventListener('click', () => {
   renderQuality();
+  renderVideoPref();
   renderAutoLock();
   renderStorage();
+  videoEncoderCodec().then(codec => {
+    $('#videoSupport').textContent = codec
+      ? `Este dispositivo comprime vídeo en ${CODEC_NAMES[codec] || codec} ✓`
+      : 'Este dispositivo no permite comprimir vídeos desde la app: se guardan en calidad original.';
+  });
   $('#version').textContent = `Baúl ${APP_VERSION} · ${canGzip ? 'compresión activa' : 'tu iOS no permite comprimir: actualiza a iOS 16.4 o superior'}`;
   settings.showModal();
 });
@@ -1708,6 +1974,13 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
     quality = b.dataset.q;
     prefs.set('baul.quality', quality);
     renderQuality();
+  });
+}
+for (const b of document.querySelectorAll('#videoGroup .row')) {
+  b.addEventListener('click', () => {
+    videoPref = b.dataset.vq;
+    prefs.set('baul.videoq', videoPref);
+    renderVideoPref();
   });
 }
 for (const b of document.querySelectorAll('#autoLockGroup .row')) {
@@ -2077,6 +2350,7 @@ async function gate() {
   await playUnlock(loading);
   await loading;
   runOptimizer();
+  askPendingVideoQuality();
 }
 
 $('#lockForgot').addEventListener('click', async () => {
@@ -2102,6 +2376,7 @@ function lockNow() {
   if (locked) return;
   if (busy) { toast('Espera a que termine'); return; }
   locked = true;
+  interruptVideo();
   // Si se está guardando algo, la llave se mantiene hasta que termine (ver ingestList).
   if (!isCopying()) masterKey = null;
   if (updateReady && !isCopying()) { location.reload(); return; }
@@ -2170,6 +2445,8 @@ document.addEventListener('visibilitychange', () => {
   const open = !locked && lockEl.hidden;
   if (document.hidden) {
     hiddenAt = Date.now();
+    // iOS pausa las apps en segundo plano: la compresión de vídeo se corta y se retoma al volver.
+    interruptVideo();
     if (!open || isPicking()) return;
     if (autoLockSeconds() === 0 && !busy) lockNow();
     else $('#cover').hidden = false;
