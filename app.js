@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.9.1';
 
 /* ================= Utilidades ================= */
 
@@ -3474,6 +3474,7 @@ $('#settingsBtn').addEventListener('click', () => {
       : 'Este dispositivo no permite comprimir vídeos desde la app: se guardan en calidad original.';
   });
   $('#version').textContent = `Baúl ${APP_VERSION} · ${canGzip ? 'compresión activa' : 'tu iOS no permite comprimir: actualiza a iOS 16.4 o superior'}`;
+  renderUpdate();
   settings.showModal();
 });
 $('#settingsClose').addEventListener('click', () => settings.close());
@@ -3510,9 +3511,12 @@ const OFFLINE_PACKS = {
     files: () => ['godot.html', ...GODOT_RUNTIMES.flatMap(v => ['godot.js', 'godot.wasm', 'godot.audio.worklet.js', ...(v.startsWith('4') ? ['godot.audio.position.worklet.js'] : [])].map(f => `vendor/godot-${v}/${f}`))],
   },
 };
-function renderOfflinePacks() {
+// «Listo» si todos sus archivos ya están en el iPhone (se conservan de una versión de la app a otra).
+async function renderOfflinePacks() {
   for (const [id, pack] of Object.entries(OFFLINE_PACKS)) {
-    $(`#${id} .val`).textContent = prefs.get(`baul.${id}`, '') === APP_VERSION ? 'Listo ✓' : pack.size;
+    const files = pack.files();
+    const have = await Promise.all(files.map(f => caches.match(f, { ignoreSearch: true }))).catch(() => []);
+    $(`#${id} .val`).textContent = have.length === files.length && have.every(Boolean) ? 'Listo ✓' : pack.size;
   }
 }
 for (const [id, pack] of Object.entries(OFFLINE_PACKS)) {
@@ -3527,7 +3531,6 @@ for (const [id, pack] of Object.entries(OFFLINE_PACKS)) {
         if (!res.ok) throw new Error(`No se pudo descargar ${files[i].split('/').pop()}`);
         await res.arrayBuffer();
       }
-      prefs.set(`baul.${id}`, APP_VERSION);
       toast('Listo: ya puedes jugar sin internet');
     } catch (err) {
       ask({ title: 'No se pudo descargar', message: `${err.message || err}\n\nComprueba la conexión e inténtalo otra vez.`, cancel: null });
@@ -3936,6 +3939,38 @@ $('#lockForgot').addEventListener('click', async () => {
 });
 
 let updateReady = false;
+function renderUpdate() {
+  $('#updateBtn .grow').textContent = updateReady ? 'Poner la versión nueva' : 'Buscar actualización';
+  $('#updateVal').textContent = updateReady ? 'Lista ✓' : '';
+}
+// Busca una versión nueva de la app (iOS no recarga las apps que vuelven del segundo plano: hay que pedirlo).
+let lastUpdateCheck = Date.now();
+async function checkForUpdate() {
+  lastUpdateCheck = Date.now();
+  const reg = await navigator.serviceWorker?.getRegistration();
+  await reg?.update();
+  return reg?.installing || reg?.waiting || null;
+}
+$('#updateBtn').addEventListener('click', async () => {
+  // Para ponerla, el Baúl se bloquea y se recarga: luego se entra con el código, como siempre.
+  if (updateReady) { settings.close(); lockNow(); return; }
+  $('#updateVal').textContent = 'Buscando…';
+  try {
+    const next = await checkForUpdate();
+    if (!next) { toast(`Ya tienes la última versión (${APP_VERSION})`); return; }
+    $('#updateVal').textContent = 'Descargando…';
+    await new Promise(resolve => {
+      const done = () => { if (next.state === 'activated' || next.state === 'redundant') resolve(); };
+      next.addEventListener('statechange', done);
+      done();
+      setTimeout(resolve, 120_000);
+    });
+  } catch {
+    toast('No se pudo buscar: comprueba la conexión a internet');
+  } finally {
+    renderUpdate();
+  }
+});
 
 function lockNow() {
   if (locked) return;
@@ -4018,6 +4053,7 @@ document.addEventListener('visibilitychange', () => {
     else $('#cover').hidden = false;
   } else {
     $('#cover').hidden = true;
+    if (Date.now() - lastUpdateCheck > 10 * 60_000) checkForUpdate().catch(() => {});
     if (open && !isPicking() && Date.now() - hiddenAt >= autoLockSeconds() * 1000) lockNow();
     else if (!locked) runOptimizer();
   }
@@ -4044,7 +4080,11 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return;
     if (locked && !pinPad.value && !isCopying() && !busy && !masterKey) location.reload();
-    else updateReady = true;
+    else {
+      updateReady = true;
+      renderUpdate();
+      toast('Versión nueva del Baúl lista: se pondrá al bloquearlo');
+    }
   });
 }
 if (isStandalone) requestPersist();

@@ -63,6 +63,6 @@ La app es una web instalable (PWA): se publica una vez y se instala desde Safari
 
 Requisitos: iOS 16.4 o superior (para la compresión sin pérdidas; en versiones anteriores funciona pero sin comprimir documentos).
 
-Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v14`). La app instalada se actualiza sola la próxima vez que se abre con internet.
+Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v14`). La app instalada se actualiza sola la próxima vez que se abre con internet (o al volver a ella tras un rato), y en Ajustes → *Buscar actualización* se puede pedir en el momento. Los emuladores y motores descargados se guardan aparte y no se vuelven a bajar al actualizar.
 
 > El icono de la pantalla de inicio lo guarda iOS al instalar la app. Para ver un icono nuevo hay que quitar el Baúl de la pantalla de inicio y volver a añadirlo, y **quitarlo borra sus archivos**: exporta antes una copia de seguridad y restáurala después.

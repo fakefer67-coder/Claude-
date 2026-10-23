@@ -1,8 +1,10 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v13';
+const CACHE = 'baul-v14';
 // Copia temporal de la app web que se está usando (la crea y la borra app.js).
 const RUN_CACHE = 'baul-run';
+// Emuladores y librerías: van aparte y sobreviven a las actualizaciones de la app.
+const VENDOR_CACHE = 'baul-vendor';
 const ASSETS = [
   './',
   './index.html',
@@ -34,13 +36,17 @@ self.addEventListener('activate', e => {
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== RUN_CACHE).map(async k => {
-        // Conservar los emuladores y librerías ya descargados al cambiar de versión.
+        // De la versión anterior se quitan sus páginas; los emuladores y librerías ya descargados se quedan donde
+        // están, sin copiarlos (pueden ser cientos de MB): así la versión nueva se pone en un momento.
+        const current = await caches.open(CACHE);
         const old = await caches.open(k);
-        const keep = await caches.open(CACHE);
-        for (const r of await old.keys()) {
-          if (new URL(r.url).pathname.includes('/vendor/')) await keep.put(r, await old.match(r));
+        const requests = await old.keys();
+        const stale = [];
+        for (const r of requests) {
+          if (!new URL(r.url).pathname.includes('/vendor/') || await current.match(r)) stale.push(r);
         }
-        return caches.delete(k);
+        if (stale.length === requests.length && k !== VENDOR_CACHE) return caches.delete(k);
+        return Promise.all(stale.map(r => old.delete(r)));
       })))
       .then(() => self.clients.claim()),
   );
@@ -64,7 +70,7 @@ self.addEventListener('fetch', e => {
       const cached = await caches.match(req, { ignoreSearch: true });
       if (cached) return cached;
       const res = await fetch(req);
-      if (res.ok) await (await caches.open(CACHE)).put(req, res.clone());
+      if (res.ok) await (await caches.open(VENDOR_CACHE)).put(req, res.clone());
       return res;
     })());
     return;
