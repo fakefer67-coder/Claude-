@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 
 /* ================= Utilidades ================= */
 
@@ -332,7 +332,7 @@ const gameSystemOf = name => GAME_BY_EXT[extOf(name)];
 // Programas de MS-DOS: se ejecutan dentro del baúl con js-dos (DOSBox). Un .exe puede ser de MS-DOS o de Windows.
 const DOS_EXTS = new Set(['exe', 'com', 'bat', 'jsdos']);
 // Juegos y programas que se pueden abrir aquí o llevar a otro sistema.
-const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks']);
+const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks', 'pck']);
 
 // Programas de otros sistemas: se pueden guardar, y hay formas de usarlos desde el iPhone (ver «WAYS»).
 const WINDOWS_APP = 'Es un programa de Windows: no se abre aquí, pero sí con otras apps del iPhone, desde tu PC o desde la nube.';
@@ -355,7 +355,7 @@ const FILE_STYLE = {
   json: ['{ }', '#e3d39f'], geojson: ['{ }', '#e3d39f'], xml: ['XML', '#c9b3e8'], yaml: ['YML', '#c9b3e8'],
   yml: ['YML', '#c9b3e8'], epub: ['EPUB', '#c9b3e8'],
   exe: ['EXE', '#b9c4ea'], com: ['DOS', '#b9c4ea'], bat: ['DOS', '#b9c4ea'], jsdos: ['DOS', '#b9c4ea'],
-  apk: ['APK', '#a6d4b9'], xapk: ['APK', '#a6d4b9'], apks: ['APK', '#a6d4b9'],
+  apk: ['APK', '#a6d4b9'], xapk: ['APK', '#a6d4b9'], apks: ['APK', '#a6d4b9'], pck: ['PCK', '#b9c4ea'],
 };
 function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
@@ -1767,11 +1767,19 @@ function otherView(meta, file) {
     // Hay que mirar dentro del .exe para saber si es de MS-DOS o de Windows.
     const slot = el('div');
     box.append(slot);
-    isDosProgram(meta, file).catch(() => false).then(dos => {
+    isDosProgram(meta, file).catch(() => false).then(async dos => {
       if (dos) {
         const run = el('button', 'play', 'Ejecutar');
         run.onclick = () => openDos(meta, file);
         slot.replaceWith(run, el('div', 's', 'Programa de MS-DOS · se abre aquí mismo'));
+        return;
+      }
+      // Un juego de Windows hecho con Godot lleva el juego (.pck) pegado al .exe: se abre con el motor web.
+      const godot = ext === 'exe' ? await godotPackInfo(file).catch(() => null) : null;
+      if (godot) {
+        const run = el('button', 'play', 'Ejecutar');
+        run.onclick = () => openGodot(meta, godot);
+        slot.replaceWith(run, el('div', 's', `Juego hecho con Godot ${godot.version} · se abre aquí mismo`));
       } else {
         slot.replaceWith(el('p', 'why', WINDOWS_APP), waysButton('windows'));
       }
@@ -1781,13 +1789,26 @@ function otherView(meta, file) {
     // Hay que mirar dentro del .apk: si es una app web (HTML5) se abre aquí mismo.
     const slot = el('div');
     box.append(slot);
-    inspectWebApp(meta, file).catch(() => ({})).then(info => {
-      if (info.page) {
+    inspectApp(meta, file).catch(() => ({})).then(info => {
+      if (info.page || info.godot) {
         const run = el('button', 'play', 'Ejecutar');
-        run.onclick = () => openWebApp(meta, file, info);
-        slot.replaceWith(run, el('div', 's', 'App web (HTML5) · se abre aquí mismo'));
+        run.onclick = () => (info.godot ? openGodot(meta, info) : openWebApp(meta, file, info));
+        slot.replaceWith(run, el('div', 's', info.godot ? `Juego hecho con Godot ${info.version} · se abre aquí mismo` : 'App web (HTML5) · se abre aquí mismo'));
       } else {
         slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
+      }
+    });
+  }
+  if (ext === 'pck') {
+    const slot = el('div');
+    box.append(slot);
+    godotPackInfo(file).catch(err => ({ error: err.message })).then(info => {
+      if (info?.godot) {
+        const run = el('button', 'play', 'Ejecutar');
+        run.onclick = () => openGodot(meta, info);
+        slot.replaceWith(run, el('div', 's', `Juego hecho con Godot ${info.version} · se abre aquí mismo`));
+      } else {
+        slot.replaceWith(el('p', 'why', info?.error || 'No es un juego de Godot que el Baúl pueda abrir.'));
       }
     });
   }
@@ -1810,11 +1831,13 @@ async function chooseSystemAndPlay(meta, file) {
   if (extOf(meta.name) === 'zip') {
     options.push({ label: 'PC antiguo (MS-DOS)', sub: 'Juegos y programas de antes de Windows 95', value: 'dos' });
     options.push({ label: 'Juego web (HTML5)', sub: 'Un .zip con un index.html dentro', value: 'web' });
+    options.push({ label: 'Juego hecho con Godot', sub: 'Un .zip con el .pck (o el .exe) del juego', value: 'godot' });
   }
   const system = await menu('¿De qué sistema es el juego?', options,
     'Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.');
   if (system === 'dos') openDos(meta, file);
   else if (system === 'web') openWebApp(meta, file);
+  else if (system === 'godot') openGodotZip(meta, file);
   else if (system) openGame(meta, system, file);
 }
 
@@ -1837,6 +1860,12 @@ function openPlayer(meta, page, start, { saveId = null, web = false } = {}) {
   const onMessage = e => {
     if (e.source !== frame.contentWindow || e.origin !== location.origin) return;
     if (e.data?.type === 'ready' && start) frame.contentWindow.postMessage(start, location.origin);
+    // El juego terminó (o no pudo arrancar): se cierra el visor y, si hubo errores, se explican.
+    if (e.data?.type === 'exit') {
+      closeGame(false);
+      if (e.data.errors?.length) ask({ title: 'El juego se cerró', message: e.data.errors.join('\n'), cancel: null });
+    }
+    if (e.data?.type === 'problems') toast('Este juego da errores al cargar: puede que no funcione bien');
   };
   window.addEventListener('message', onMessage);
   emuSession = { frame, onMessage, saveId, web, key: masterKey };
@@ -1876,6 +1905,11 @@ $('#emuClose').addEventListener('click', () => closeGame());
 const clearGameSaves = () => Promise.all([
   new Promise(resolve => {
     const r = indexedDB.deleteDatabase('EmulatorJS-states');
+    r.onsuccess = r.onerror = r.onblocked = () => resolve();
+  }),
+  // Partidas de los juegos de Godot (su carpeta user://).
+  new Promise(resolve => {
+    const r = indexedDB.deleteDatabase('/userfs');
     r.onsuccess = r.onerror = r.onblocked = () => resolve();
   }),
   clearWebAppData(null),
@@ -2046,6 +2080,203 @@ async function storeDosChanges(id, changes, key) {
   });
 }
 
+/* ---- Juegos hechos con Godot (.apk, .pck o .exe): el motor web oficial de la misma versión (ver godot.html) ---- */
+
+// Versión del motor web que abre cada versión de Godot: los scripts compilados solo los entiende la suya.
+function godotRuntime(major, minor) {
+  if (major === 3) return '3.6.3';
+  if (major !== 4) return null;
+  if (minor <= 3) return '4.3';
+  return minor === 4 ? '4.4.1' : '4.7.2';
+}
+const GODOT_PACK_MAGIC = 0x43504447; // «GDPC»
+
+// En un .apk de Godot, los archivos del juego van sueltos en assets/ junto a project.binary (o en un .pck).
+async function godotApkInfo(files) {
+  const project = files.find(e => /(^|\/)assets\/project\.binary$/.test(e.name));
+  if (!project) {
+    const pack = files.find(e => /(^|\/)assets\/[^/]+\.pck$/i.test(e.name));
+    return pack ? godotPackInfo(await pack.blob()) : null;
+  }
+  const root = project.name.slice(0, -'project.binary'.length);
+  const game = files.filter(e => e.name.startsWith(root) && !e.name.startsWith(`${root}dexopt/`));
+  // Godot 4 escribe su versión («4.4») en la configuración del proyecto.
+  const settings = new TextDecoder('latin1').decode(await (await project.blob()).arrayBuffer());
+  const feature = /config\/features[\s\S]{0,64}?\x00(\d)\.(\d+)\x00/.exec(settings);
+  const major = feature ? Number(feature[1]) : game.some(e => e.name.startsWith(`${root}.godot/`)) ? 4 : 3;
+  let minor = feature ? Number(feature[2]) : null;
+  if (major === 4 && minor === null) {
+    // Sin versión escrita: la delatan los scripts compilados (100 = Godot 4.3/4.4, 101 = 4.5 o más).
+    const gdc = game.find(e => e.name.endsWith('.gdc'));
+    const tokens = gdc ? new DataView(await (await gdc.blob()).slice(4, 8).arrayBuffer()).getUint32(0, true) : 0;
+    minor = tokens >= 101 ? 7 : tokens === 100 ? 4 : 3;
+  }
+  const runtime = godotRuntime(major, minor);
+  if (!runtime) return null;
+  return { godot: runtime, version: minor === null ? `${major}` : `${major}.${minor}`, files: game.map(e => ({ path: e.name.slice(root.length), entry: e })) };
+}
+
+// Lee el índice de un .pck de Godot, suelto o pegado al final de un .exe.
+async function godotPackInfo(blob) {
+  const u32At = async at => new DataView(await blob.slice(at, at + 4).arrayBuffer()).getUint32(0, true);
+  if (blob.size < 100) return null;
+  let start = 0;
+  if (await u32At(0) !== GODOT_PACK_MAGIC) {
+    const tail = new DataView(await blob.slice(blob.size - 12).arrayBuffer());
+    if (tail.getUint32(8, true) !== GODOT_PACK_MAGIC) return null;
+    start = blob.size - 12 - Number(tail.getBigUint64(0, true));
+    if (start < 0 || await u32At(start) !== GODOT_PACK_MAGIC) return null;
+  }
+  const head = new DataView(await blob.slice(start, start + 128).arrayBuffer());
+  const format = head.getUint32(4, true);
+  const major = head.getUint32(8, true);
+  const minor = head.getUint32(12, true);
+  let flags = 0;
+  let base = start;
+  let dir;
+  if (format === 1) {
+    dir = start + 20 + 64;
+  } else if (format === 2) {
+    flags = head.getUint32(20, true);
+    const fileBase = Number(head.getBigUint64(24, true));
+    base = flags & 2 ? start + fileBase : fileBase;
+    dir = start + 32 + 64;
+  } else if (format === 3 || format === 4) {
+    flags = head.getUint32(20, true);
+    base = start + Number(head.getBigUint64(24, true));
+    dir = start + Number(head.getBigUint64(32, true));
+  } else {
+    throw new Error('Este juego es de una versión de Godot que el Baúl todavía no conoce.');
+  }
+  if (flags & 1) throw new Error('Este juego de Godot está cifrado por su autor y no se puede abrir.');
+  if (flags & 4) throw new Error('Este juego de Godot viene repartido en varios archivos y no se puede abrir así.');
+  const runtime = godotRuntime(major, minor);
+  if (!runtime) throw new Error(`Está hecho con Godot ${major}, que el Baúl todavía no puede abrir (sí abre los de Godot 3 y 4).`);
+
+  // El índice ocupa poco: se lee por bloques hasta tenerlo entero.
+  let size = Math.min(blob.size - dir, 1 << 20);
+  for (;;) {
+    const view = new DataView(await blob.slice(dir, dir + size).arrayBuffer());
+    try {
+      const td = new TextDecoder();
+      const count = view.getUint32(0, true);
+      const files = [];
+      let p = 4;
+      for (let i = 0; i < count; i++) {
+        const len = view.getUint32(p, true);
+        const path = td.decode(new Uint8Array(view.buffer, p + 4, len)).replace(/\0+$/, '').replace(/^res:\/\//, '');
+        p += 4 + len;
+        let ofs = Number(view.getBigUint64(p, true));
+        const length = Number(view.getBigUint64(p + 8, true));
+        p += 32;
+        let fileFlags = 0;
+        if (format >= 2) { fileFlags = view.getUint32(p, true); p += 4; }
+        if (fileFlags & 1) throw new Error('Este juego de Godot está cifrado por su autor y no se puede abrir.');
+        if (fileFlags & 2) continue; // archivo borrado por un parche
+        // Godot 3 guarda posiciones desde el principio del archivo cuando el juego va pegado al .exe.
+        if (format === 1 && !(start && ofs >= start)) ofs += start;
+        else if (format >= 2) ofs += base;
+        files.push({ path, blob: blob.slice(ofs, ofs + length) });
+      }
+      return { godot: runtime, version: `${major}.${minor}`, files };
+    } catch (err) {
+      if (!(err instanceof RangeError) || size >= blob.size - dir) throw err;
+      size = Math.min(blob.size - dir, size * 4);
+    }
+  }
+}
+
+// Las texturas vienen preparadas para una plataforma (móvil o PC): se apunta a la que existe de verdad.
+async function fixGodotImport(blob, have) {
+  const text = await blob.text();
+  const line = /^path\.\w+="res:\/\/([^"]+)"[ \t\r]*$/gm;
+  const found = [...text.matchAll(line)].map(m => m[1]).find(p => have.has(p));
+  if (!found) return blob;
+  let first = true;
+  return new Blob([text.replace(line, () => (first ? ((first = false), `path="res://${found}"`) : ''))]);
+}
+
+// Monta el .pck que espera el motor web, con los mismos archivos del juego.
+async function buildGodotPack(files, runtime, onProgress) {
+  const [major, minor, patch = 0] = runtime.split('.').map(Number);
+  const v2 = major >= 4;
+  const enc = new TextEncoder();
+  const pad = (n, a) => (a - (n % a)) % a;
+  const have = new Set(files.map(f => f.path));
+  const items = [];
+  for (let i = 0; i < files.length; i++) {
+    onProgress?.(i / files.length);
+    let blob = files[i].blob || await files[i].entry.blob();
+    if (files[i].path.endsWith('.import')) blob = await fixGodotImport(blob, have);
+    items.push({ name: enc.encode(`res://${files[i].path}`), blob });
+  }
+  let base = (v2 ? 32 : 20) + 64 + 4 + items.reduce((n, it) => n + 4 + it.name.length + pad(it.name.length, 4) + 32 + (v2 ? 4 : 0), 0);
+  base += pad(base, 32);
+  const head = new Uint8Array(base);
+  const view = new DataView(head.buffer);
+  let p = 0;
+  const u32 = v => { view.setUint32(p, v, true); p += 4; };
+  const u64 = v => { view.setBigUint64(p, BigInt(v), true); p += 8; };
+  u32(GODOT_PACK_MAGIC);
+  u32(v2 ? 2 : 1);
+  u32(major); u32(minor); u32(patch);
+  if (v2) { u32(2); u64(base); } // posiciones relativas al principio del .pck
+  p += 64;
+  u32(items.length);
+  const parts = [head];
+  let off = 0;
+  for (const it of items) {
+    const len = it.name.length + pad(it.name.length, 4);
+    u32(len);
+    head.set(it.name, p);
+    p += len;
+    u64(v2 ? off : base + off);
+    u64(it.blob.size);
+    p += 16; // md5 (no se comprueba)
+    if (v2) u32(0);
+    const gap = pad(it.blob.size, 32);
+    parts.push(it.blob);
+    if (gap) parts.push(new Uint8Array(gap));
+    off += it.blob.size + gap;
+  }
+  return new Blob(parts);
+}
+
+async function openGodot(meta, info) {
+  if (busy) return;
+  busy = true;
+  let pack;
+  try {
+    pack = await buildGodotPack(info.files, info.godot, f => showProgress('Preparando el juego…', meta.name, f));
+  } catch (err) {
+    hideProgress();
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+    return;
+  } finally {
+    busy = false;
+    hideProgress();
+  }
+  if (!locked) openPlayer(meta, 'godot.html', { type: 'start', runtime: info.godot, pack });
+}
+
+// Un .zip con un juego de Godot para PC: su .pck, o el .exe que lo lleva dentro.
+async function openGodotZip(meta, file) {
+  let info = null;
+  try {
+    const entries = (await readZip(file)).filter(e => !e.name.endsWith('/'));
+    const candidates = [...entries.filter(e => /\.pck$/i.test(e.name)), ...entries.filter(e => /\.(exe|x86_64|bin)$/i.test(e.name))];
+    for (const entry of candidates) {
+      info = await godotPackInfo(await entry.blob());
+      if (info) break;
+    }
+  } catch (err) {
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+    return;
+  }
+  if (!info) ask({ title: 'No se puede abrir', message: 'No hay ningún juego de Godot (.pck) dentro del .zip.', cancel: null });
+  else openGodot(meta, info);
+}
+
 /* ---- Apps y juegos web (HTML5): los .apk que llevan una web dentro, o un .zip con un index.html ---- */
 
 // Con qué está hecho un .apk que no es web (y por tanto necesita Android de verdad).
@@ -2063,13 +2294,15 @@ const APK_ENGINES = [
   [/(^|\/)META-INF\/AIR\//, 'Adobe AIR'],
 ];
 function nativeApkReason(engine) {
+  if (engine === 'Godot 2') return 'Está hecho con Godot 2, una versión muy antigua del motor que el Baúl todavía no puede abrir (sí abre los de Godot 3 y 4).';
   const what = engine ? `Está hecha con ${engine}` : 'Es una app nativa de Android';
   return `${what}: necesita Android de verdad, y Safari no deja ejecutar ese código en el iPhone. ` +
     'El Baúl abre por dentro las apps y juegos de Android hechos con tecnología web (HTML5), y este no lo es.';
 }
 
-// Busca la web que trae un .apk (también dentro de .xapk/.apks, que llevan varios .apk) o un .zip.
-async function inspectWebApp(meta, file) {
+// Qué trae un .apk (también dentro de .xapk/.apks, que llevan varios .apk) o un .zip:
+// un juego de Godot, una web (HTML5), o una app nativa que necesita Android.
+async function inspectApp(meta, file) {
   let entries = await readZip(file);
   if (!entries.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name))) {
     // Paquete con varios .apk dentro: el principal es el que trae la carpeta assets/.
@@ -2080,6 +2313,11 @@ async function inspectWebApp(meta, file) {
   }
   const files = entries.filter(e => !e.name.endsWith('/') && !/(^|\/)__MACOSX\//.test(e.name));
   const isApp = files.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name));
+  if (isApp) {
+    if (files.some(e => /(^|\/)assets\/engine\.cfb$/.test(e.name))) return { engine: 'Godot 2' };
+    const godot = await godotApkInfo(files);
+    if (godot) return godot;
+  }
   const engine = APK_ENGINES.find(([re]) => files.some(e => re.test(e.name)))?.[1];
   if (isApp && engine) return { engine };
   // La página principal más cercana a la raíz (en un .apk, dentro de assets/).
@@ -2110,7 +2348,7 @@ async function openWebApp(meta, file, info = null) {
   }
   busy = true;
   try {
-    info ??= await inspectWebApp(meta, file);
+    info ??= await inspectApp(meta, file);
     if (!info.page) throw new Error(info.engine !== undefined || ANDROID_EXTS.has(extOf(meta.name))
       ? nativeApkReason(info.engine) : 'No hay ningún index.html dentro del .zip.');
     await clearRunCache();
@@ -2454,7 +2692,7 @@ $('#settingsBtn').addEventListener('click', () => {
   renderVideoPref();
   renderAutoLock();
   renderStorage();
-  renderGamesOffline();
+  renderOfflinePacks();
   videoEncoderCodec().then(codec => {
     $('#videoSupport').textContent = codec
       ? `Este dispositivo comprime vídeo en ${CODEC_NAMES[codec] || codec} ✓`
@@ -2476,30 +2714,43 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
     renderQuality();
   });
 }
-function renderGamesOffline() {
-  $('#gamesOffline .val').textContent = prefs.get('baul.gamesOffline', '') === APP_VERSION ? 'Listo ✓' : '≈ 12 MB';
-}
-$('#gamesOffline').addEventListener('click', async () => {
-  if (busy) return;
-  busy = true;
-  const files = emulatorFiles();
-  try {
-    for (let i = 0; i < files.length; i++) {
-      showProgress('Descargando emuladores…', `${i + 1} de ${files.length}`, i / files.length);
-      const res = await fetch(files[i]);
-      if (!res.ok) throw new Error(`No se pudo descargar ${files[i].split('/').pop()}`);
-      await res.arrayBuffer();
-    }
-    prefs.set('baul.gamesOffline', APP_VERSION);
-    toast('Listo: ya puedes jugar sin internet');
-  } catch (err) {
-    ask({ title: 'No se pudo descargar', message: `${err.message || err}\n\nComprueba la conexión e inténtalo otra vez.`, cancel: null });
-  } finally {
-    busy = false;
-    hideProgress();
-    renderGamesOffline();
+// Motores que se pueden descargar para jugar sin internet (también se guardan solos la primera vez que se usan).
+const GODOT_RUNTIMES = ['3.6.3', '4.3', '4.4.1', '4.7.2'];
+const OFFLINE_PACKS = {
+  gamesOffline: { what: 'emuladores', size: '≈ 12 MB', files: () => emulatorFiles() },
+  godotOffline: {
+    what: 'el motor de Godot', size: '≈ 40 MB',
+    files: () => ['godot.html', ...GODOT_RUNTIMES.flatMap(v => ['godot.js', 'godot.wasm', 'godot.audio.worklet.js', ...(v.startsWith('4') ? ['godot.audio.position.worklet.js'] : [])].map(f => `vendor/godot-${v}/${f}`))],
+  },
+};
+function renderOfflinePacks() {
+  for (const [id, pack] of Object.entries(OFFLINE_PACKS)) {
+    $(`#${id} .val`).textContent = prefs.get(`baul.${id}`, '') === APP_VERSION ? 'Listo ✓' : pack.size;
   }
-});
+}
+for (const [id, pack] of Object.entries(OFFLINE_PACKS)) {
+  $(`#${id}`).addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    const files = pack.files();
+    try {
+      for (let i = 0; i < files.length; i++) {
+        showProgress(`Descargando ${pack.what}…`, `${i + 1} de ${files.length}`, i / files.length);
+        const res = await fetch(files[i]);
+        if (!res.ok) throw new Error(`No se pudo descargar ${files[i].split('/').pop()}`);
+        await res.arrayBuffer();
+      }
+      prefs.set(`baul.${id}`, APP_VERSION);
+      toast('Listo: ya puedes jugar sin internet');
+    } catch (err) {
+      ask({ title: 'No se pudo descargar', message: `${err.message || err}\n\nComprueba la conexión e inténtalo otra vez.`, cancel: null });
+    } finally {
+      busy = false;
+      hideProgress();
+      renderOfflinePacks();
+    }
+  });
+}
 
 for (const b of document.querySelectorAll('#videoGroup .row')) {
   b.addEventListener('click', () => {

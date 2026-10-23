@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Nada sale a internet: el juego solo puede leer los archivos de la propia app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; media-src 'self' blob: data:">
+  <title>Godot</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+    canvas { display: block; width: 100%; height: 100%; }
+    canvas:focus { outline: none; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <script>
+  // El motor de Godot deja nombres en el ámbito global: lo nuestro va dentro de una función.
+  (() => {
+    'use strict';
+    // Página aislada para el motor web oficial de Godot: el Baúl le pasa el juego ya preparado (.pck) y la cierra al salir.
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      if (e.data?.type === 'start') start(e.data).catch(err => parent.postMessage({ type: 'exit', code: 1, errors: [String(err.message || err)] }, location.origin));
+    });
+
+    const loadScript = src => new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('No se pudo cargar el motor de Godot'));
+      document.body.append(s);
+    });
+
+    async function start({ runtime, pack }) {
+      const base = `vendor/godot-${runtime}/`;
+      await loadScript(base + 'godot.js');
+      const errors = [];
+      const engine = new Engine({
+        executable: base + 'godot',
+        canvas: document.getElementById('canvas'),
+        canvasResizePolicy: 2,
+        focusCanvas: true,
+        // Las partidas (user://) se guardan en este dispositivo.
+        persistentPaths: ['/userfs'],
+        onPrintError: (...args) => { errors.push(args.join(' ')); if (errors.length > 40) errors.shift(); },
+        onExit: code => parent.postMessage({ type: 'exit', code, errors: code ? errors.slice(-8) : [] }, location.origin),
+      });
+      await engine.init(base + 'godot');
+      await engine.preloadFile(await pack.arrayBuffer(), 'game.pck');
+      await engine.start({ args: ['--main-pack', 'game.pck'] });
+      parent.postMessage({ type: 'started' }, location.origin);
+      // Si el juego no pudo cargar sus scripts, se avisa (el motor sigue abierto con la pantalla vacía).
+      setTimeout(() => {
+        const fatal = errors.filter(e => /SCRIPT ERROR|Failed to load|not compatible|Can't open|Pack/i.test(e));
+        if (fatal.length) parent.postMessage({ type: 'problems', errors: fatal.slice(0, 6) }, location.origin);
+      }, 6000);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  })();
+  </script>
+</body>
+</html>
