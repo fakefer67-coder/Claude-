@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Nada sale a internet: el programa solo puede leer los archivos de la propia app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; media-src 'self' blob:">
+  <title>MS-DOS</title>
+  <link rel="stylesheet" href="vendor/jsdos/js-dos.css">
+  <style>
+    html, body { margin: 0; height: 100%; background: #0a0a0c; overflow: hidden; }
+    #dos { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="dos"></div>
+  <script src="vendor/jsdos/js-dos.js"></script>
+  <script>
+  // js-dos deja muchos nombres cortos en el ámbito global: lo nuestro va dentro de una función.
+  (() => {
+    'use strict';
+    // Página aislada para js-dos: el Baúl le pasa el programa ya descifrado y la cierra al salir.
+    let ci = null;
+    // Chrome intenta capturar el teclado y en un iframe no le dejan: se ignora.
+    if (navigator.keyboard) navigator.keyboard.lock = () => Promise.resolve();
+
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      const msg = e.data || {};
+      if (msg.type === 'start') start(msg);
+      if (msg.type === 'save') save();
+    });
+
+    function start({ files, conf }) {
+      const props = Dos(document.getElementById('dos'), {
+        dosboxConf: conf,
+        initFs: files,
+        pathPrefix: new URL('vendor/jsdos/emulators/', location.href).href,
+        theme: 'dark',
+        backend: 'dosbox',
+        backendLocked: true,
+        autoStart: true,
+        // «Pantalla completa» ocupa todo el visor del Baúl (el iPhone no deja usar la de verdad aquí).
+        softFullscreen: true,
+        // Los cambios del disco los guarda el Baúl, cifrados, al cerrar.
+        fsChanges: { local: false },
+        onEvent: (event, c) => {
+          if (event !== 'ci-ready') return;
+          ci = c;
+          parent.postMessage({ type: 'started' }, location.origin);
+        },
+      });
+      props.setNoCloud(true);
+    }
+
+    // Devuelve los archivos que el programa creó o cambió (partidas, configuración…).
+    async function save() {
+      let changes = null;
+      try { changes = ci ? await ci.persist(true) : null; } catch { /* aún no había empezado */ }
+      parent.postMessage({ type: 'saved', changes }, location.origin);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  })();
+  </script>
+</body>
+</html>

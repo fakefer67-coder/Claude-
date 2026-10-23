@@ -285,6 +285,8 @@
     .row svg.i { color: var(--text-2); }
     .row.danger svg.i { color: var(--danger); }
     .row .label { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    a.row { color: var(--text); text-decoration: none; -webkit-tap-highlight-color: transparent; }
+    a.row::after { content: "↗"; color: var(--muted); font-size: 15px; }
     .menu-note { text-align: center; margin: -6px 10px 14px; }
     .menu-cancel { display: block; width: 100%; margin-top: 10px; padding: 14px; border-radius: var(--r); background: var(--surface-2); color: var(--text); font-weight: 600; font-size: 16px; box-shadow: inset 0 0 0 .5px var(--line); }
     .radio { width: 20px; height: 20px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line-3); flex: none; transition: box-shadow .2s var(--ease); }
@@ -593,9 +595,9 @@
 
     <h3>Juegos</h3>
     <div class="group">
-      <button class="row btn" id="gamesOffline"><span class="grow">Descargar emuladores para jugar sin internet</span><span class="val">≈ 10 MB</span></button>
+      <button class="row btn" id="gamesOffline"><span class="grow">Descargar emuladores para jugar sin internet</span><span class="val">≈ 12 MB</span></button>
     </div>
-    <p class="note">Abre los juegos que guardes de NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Mega Drive, Master System, Game Gear, Nintendo 64, PlayStation y Nintendo DS (también dentro de .zip o .7z). Los programas de Windows (.exe) y las apps de Android (.apk) se pueden guardar, pero un iPhone no puede ejecutarlos.</p>
+    <p class="note">Abre los juegos que guardes de NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Mega Drive, Master System, Game Gear, Nintendo 64, PlayStation y Nintendo DS (también dentro de .zip o .7z), y los programas y juegos de PC de MS-DOS (.exe, .com, .bat, .jsdos o un .zip con el juego). Los programas de Windows modernos (.exe) y las apps de Android (.apk) no pueden ejecutarse dentro del iPhone: ábrelos y toca «Cómo usarlo en el iPhone» para ver las alternativas.</p>
 
     <h3>Espacio</h3>
     <div class="group">

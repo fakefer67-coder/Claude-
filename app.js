@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.4.0';
 
 /* ================= Utilidades ================= */
 
@@ -133,7 +133,7 @@ function dbReplaceIfExists(rec, blob, thumb) {
   }).then(() => existed);
 }
 const dbDelete = ids => tx(FILE_STORES, 'readwrite', (m, b, t) => {
-  for (const id of ids) { m.delete(id); b.delete(id); t.delete(id); }
+  for (const id of ids) { m.delete(id); b.delete(id); b.delete(dosSaveKey(id)); t.delete(id); }
 });
 const dbDeleteFolders = ids => tx(['folders'], 'readwrite', f => { for (const id of ids) f.delete(id); });
 const dbClear = () => tx([...FILE_STORES, 'folders'], 'readwrite', (...stores) => { for (const s of stores) s.clear(); });
@@ -329,11 +329,16 @@ const GAME_BY_EXT = Object.fromEntries(Object.entries(GAME_SYSTEMS).flatMap(([ke
 const MAYBE_GAME_EXTS = new Set(['zip', '7z', 'rar', 'bin', 'iso', 'img', 'chd', 'cue']);
 const gameSystemOf = name => GAME_BY_EXT[extOf(name)];
 
-// Programas de otros sistemas: se pueden guardar, pero un iPhone no puede ejecutarlos.
-const WINDOWS_APP = 'Es un programa de Windows: un iPhone no puede ejecutarlo. Puedes guardarlo aquí y pasarlo a un ordenador con «Guardar».';
-const ANDROID_APP = 'Es una app de Android: no se puede instalar en un iPhone. Puedes guardarla aquí y pasarla a un móvil Android con «Guardar».';
+// Programas de MS-DOS: se ejecutan dentro del baúl con js-dos (DOSBox). Un .exe puede ser de MS-DOS o de Windows.
+const DOS_EXTS = new Set(['exe', 'com', 'bat', 'jsdos']);
+// Juegos y programas que se pueden abrir aquí o llevar a otro sistema.
+const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks']);
+
+// Programas de otros sistemas: se pueden guardar, y hay formas de usarlos desde el iPhone (ver «WAYS»).
+const WINDOWS_APP = 'Es un programa de Windows: el iPhone no puede ejecutarlo por sí solo, pero sí desde tu PC o desde la nube.';
+const ANDROID_APP = 'Es una app de Android: el iPhone no puede instalarla, pero sí usarla desde un Android en la nube o desde tu PC.';
 const FOREIGN_APPS = {
-  exe: WINDOWS_APP, msi: WINDOWS_APP, bat: WINDOWS_APP,
+  exe: WINDOWS_APP, msi: WINDOWS_APP,
   apk: ANDROID_APP, xapk: ANDROID_APP, apks: ANDROID_APP, aab: ANDROID_APP,
   ipa: 'Es una app de iPhone: iOS solo deja instalar apps desde la App Store, no desde archivos.',
   dmg: 'Es un programa de Mac: un iPhone no puede ejecutarlo.', pkg: 'Es un instalador de Mac: un iPhone no puede ejecutarlo.',
@@ -349,6 +354,8 @@ const FILE_STYLE = {
   zip: ['ZIP', ''], gz: ['GZ', ''], rar: ['RAR', ''], '7z': ['7Z', ''], txt: ['TXT', ''], md: ['MD', ''],
   json: ['{ }', '#e3d39f'], geojson: ['{ }', '#e3d39f'], xml: ['XML', '#c9b3e8'], yaml: ['YML', '#c9b3e8'],
   yml: ['YML', '#c9b3e8'], epub: ['EPUB', '#c9b3e8'],
+  exe: ['EXE', '#b9c4ea'], com: ['DOS', '#b9c4ea'], bat: ['DOS', '#b9c4ea'], jsdos: ['DOS', '#b9c4ea'],
+  apk: ['APK', '#a6d4b9'], xapk: ['APK', '#a6d4b9'], apks: ['APK', '#a6d4b9'],
 };
 function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
@@ -1043,7 +1050,7 @@ function matchesFilter(m) {
   if (state.filter === 'image') return m.kind === 'image';
   if (state.filter === 'video') return m.kind === 'video';
   if (state.filter === 'file') return m.kind !== 'image' && m.kind !== 'video';
-  if (state.filter === 'game') return !!gameSystemOf(m.name);
+  if (state.filter === 'game') return !!gameSystemOf(m.name) || PROGRAM_EXTS.has(extOf(m.name));
   return true;
 }
 
@@ -1356,7 +1363,8 @@ function menu(title, options, note = '') {
     const list = $('#menuList');
     list.replaceChildren();
     for (const o of options) {
-      const b = el('button', 'row' + (o.danger ? ' danger' : ''));
+      const b = el(o.href ? 'a' : 'button', 'row' + (o.danger ? ' danger' : ''));
+      if (o.href) Object.assign(b, { href: o.href, target: '_blank', rel: 'noopener' });
       b.style.paddingLeft = `${14 + (o.depth || 0) * 20}px`;
       if (o.icon) b.append(svgIcon(o.icon));
       const text = el('span', 'grow');
@@ -1743,18 +1751,35 @@ function otherView(meta, file) {
     a.src = view.url;
     box.append(a);
   }
+  const ext = extOf(meta.name);
   const system = gameSystemOf(meta.name);
   if (system) {
     const play = el('button', 'play', 'Jugar');
     play.onclick = () => openGame(meta, system, file);
     box.append(play, el('div', 's', `Emulador de ${GAME_SYSTEMS[system].name}`));
-  } else if (MAYBE_GAME_EXTS.has(extOf(meta.name))) {
+  } else if (MAYBE_GAME_EXTS.has(ext)) {
     const play = el('button', 'open', 'Jugar con un emulador…');
     play.onclick = () => chooseSystemAndPlay(meta, file);
     box.append(play);
   }
-  const foreign = FOREIGN_APPS[extOf(meta.name)];
+  if (DOS_EXTS.has(ext)) {
+    // Hay que mirar dentro del .exe para saber si es de MS-DOS o de Windows.
+    const slot = el('div');
+    box.append(slot);
+    isDosProgram(meta, file).catch(() => false).then(dos => {
+      if (dos) {
+        const run = el('button', 'play', 'Ejecutar');
+        run.onclick = () => openDos(meta, file);
+        slot.replaceWith(run, el('div', 's', 'Programa de MS-DOS · se abre aquí mismo'));
+      } else {
+        slot.replaceWith(el('p', 'why', WINDOWS_APP), waysButton('windows'));
+      }
+    });
+  }
+  const foreign = DOS_EXTS.has(ext) ? null : FOREIGN_APPS[ext];
   if (foreign) box.append(el('p', 'why', foreign));
+  if (ANDROID_EXTS.has(ext)) box.append(waysButton('android'));
+  else if (ext === 'msi') box.append(waysButton('windows'));
   const open = el('button', 'open', 'Abrir en otra app');
   open.onclick = () => shareFiles([file]);
   box.append(open);
@@ -1767,44 +1792,56 @@ const emu = $('#emu');
 let emuSession = null;
 
 async function chooseSystemAndPlay(meta, file) {
-  const system = await menu('¿De qué consola es el juego?', Object.entries(GAME_SYSTEMS).map(([key, s]) => ({ label: s.name, value: key })),
+  const options = Object.entries(GAME_SYSTEMS).map(([key, s]) => ({ label: s.name, value: key }));
+  if (extOf(meta.name) === 'zip') options.push({ label: 'PC antiguo (MS-DOS)', sub: 'Juegos y programas de antes de Windows 95', value: 'dos' });
+  const system = await menu('¿De qué sistema es el juego?', options,
     'Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.');
-  if (system) openGame(meta, system, file);
+  if (system === 'dos') openDos(meta, file);
+  else if (system) openGame(meta, system, file);
 }
 
 function openGame(meta, system, file) {
+  // El emulador guarda sus partidas con este nombre: un identificador, para no dejar el nombre del juego sin cifrar.
+  const gameName = `${meta.id}.${extOf(meta.name) || 'rom'}`;
+  openPlayer(meta, 'emulator.html', { type: 'start', core: system, game: file, name: gameName });
+}
+
+// Abre un emulador (página aislada) a pantalla completa y le pasa el juego cuando está listo.
+// `saveId`: las partidas de MS-DOS se guardan cifradas en el baúl, con la llave de esta sesión.
+function openPlayer(meta, page, start, saveId = null) {
   closeGame(false);
   const frame = el('iframe');
   frame.title = meta.name;
   frame.allow = 'autoplay; gamepad; fullscreen';
-  frame.src = 'emulator.html';
-  // El emulador guarda sus partidas con este nombre: un identificador, para no dejar el nombre del juego sin cifrar.
-  const gameName = `${meta.id}.${extOf(meta.name) || 'rom'}`;
+  frame.src = page;
   const onMessage = e => {
     if (e.source !== frame.contentWindow || e.origin !== location.origin) return;
-    if (e.data?.type === 'ready') frame.contentWindow.postMessage({ type: 'start', core: system, game: file, name: gameName }, location.origin);
+    if (e.data?.type === 'ready') frame.contentWindow.postMessage(start, location.origin);
   };
   window.addEventListener('message', onMessage);
-  emuSession = { frame, onMessage };
+  emuSession = { frame, onMessage, saveId, key: masterKey };
   $('#emuTitle').textContent = meta.name;
   $('#emuHost').replaceChildren(frame);
   emu.hidden = false;
   document.documentElement.classList.add('noscroll');
 }
 
-// Cierra el juego; antes pide al emulador que guarde la memoria del cartucho.
+// Cierra el juego; antes pide al emulador que guarde la memoria del cartucho (o el disco de MS-DOS).
 async function closeGame(save = true) {
   const session = emuSession;
   if (!session) return;
   emuSession = null;
   if (save && session.frame.contentWindow) {
-    await new Promise(resolve => {
-      const done = e => { if (e.source === session.frame.contentWindow && e.data?.type === 'saved') finish(); };
-      const finish = () => { window.removeEventListener('message', done); clearTimeout(timer); resolve(); };
-      const timer = setTimeout(finish, 800);
+    const changes = await new Promise(resolve => {
+      const done = e => { if (e.source === session.frame.contentWindow && e.data?.type === 'saved') finish(e.data.changes); };
+      const finish = value => { window.removeEventListener('message', done); clearTimeout(timer); resolve(value); };
+      const timer = setTimeout(finish, session.saveId ? 4000 : 800);
       window.addEventListener('message', done);
       session.frame.contentWindow.postMessage({ type: 'save' }, location.origin);
     });
+    if (session.saveId && changes?.length) {
+      await storeDosChanges(session.saveId, changes, session.key).catch(err => toast(`No se pudo guardar la partida: ${err.message || err}`));
+    }
   }
   window.removeEventListener('message', session.onMessage);
   $('#emuHost').replaceChildren();
@@ -1819,7 +1856,200 @@ const clearGameSaves = () => new Promise(resolve => {
   r.onsuccess = r.onerror = r.onblocked = () => resolve();
 });
 
-// Archivos que usa el emulador en este dispositivo, para descargarlos y poder jugar sin internet.
+/* ---- MS-DOS: programas y juegos de PC antiguos, con js-dos (DOSBox) ---- */
+
+const ANDROID_EXTS = new Set(['apk', 'xapk', 'apks', 'aab']);
+
+// Un .exe de Windows lleva la firma «PE» (o «NE» si es de Windows 3.x) tras la cabecera de MS-DOS.
+async function isDosProgram(meta, file) {
+  const ext = extOf(meta.name);
+  if (ext !== 'exe') return DOS_EXTS.has(ext);
+  const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+  const mz = (head[0] === 0x4d && head[1] === 0x5a) || (head[0] === 0x5a && head[1] === 0x4d);
+  if (!mz || head.length < 28) return false;
+  if (head.length < 64) return true;
+  const next = new DataView(head.buffer).getUint32(0x3c, true);
+  if (next < 64 || next + 2 > file.size) return true;
+  const sig = String.fromCharCode(...new Uint8Array(await file.slice(next, next + 2).arrayBuffer()));
+  return sig !== 'PE' && sig !== 'NE';
+}
+
+// Nombres al estilo de MS-DOS (8.3): «Mi Juego.exe» → «MIJUEGO.EXE».
+const DOS_CHARS = "A-Za-z0-9_\\-!#$%&'(){}@^`~";
+const isDosName = name => new RegExp(`^[${DOS_CHARS}]{1,8}(\\.[${DOS_CHARS}]{1,3})?$`).test(name);
+function dosName(name, taken = new Set()) {
+  const dot = name.lastIndexOf('.');
+  const clean = t => t.toUpperCase().replace(new RegExp(`[^${DOS_CHARS}]`, 'g'), '');
+  const base = clean(dot > 0 ? name.slice(0, dot) : name).slice(0, 8) || 'ARCHIVO';
+  const ext = dot > 0 ? clean(name.slice(dot + 1)).slice(0, 3) : '';
+  const full = b => b + (ext ? `.${ext}` : '');
+  let out = full(base);
+  for (let n = 1; taken.has(out); n++) out = full(base.slice(0, 7 - String(n).length) + '~' + n);
+  taken.add(out);
+  return out;
+}
+// Renombra todas las rutas de un .zip a 8.3, de forma coherente carpeta a carpeta.
+function dosPaths(paths) {
+  const dirs = new Map([['', '']]);
+  const taken = new Map();
+  const part = (parent, name) => {
+    if (!taken.has(parent)) taken.set(parent, new Set());
+    return dosName(name, taken.get(parent));
+  };
+  const join = (dir, name) => (dir ? `${dir}/${name}` : name);
+  const dirOf = path => {
+    if (!dirs.has(path)) {
+      const i = path.lastIndexOf('/');
+      const parent = dirOf(i < 0 ? '' : path.slice(0, i));
+      dirs.set(path, join(parent, part(parent, path.slice(i + 1))));
+    }
+    return dirs.get(path);
+  };
+  return paths.map(path => {
+    const i = path.lastIndexOf('/');
+    const dir = dirOf(i < 0 ? '' : path.slice(0, i));
+    return join(dir, part(dir, path.slice(i + 1)));
+  });
+}
+
+const DOS_CONF = `[sdl]
+autolock=false
+
+[dosbox]
+machine=svga_s3
+memsize=16
+
+[cpu]
+core=auto
+cputype=auto
+cycles=auto
+
+[autoexec]
+@echo off
+mount c .
+c:
+cls
+`;
+
+// Prepara el disco C: (un .zip que js-dos descomprime) y la orden que abre el programa.
+async function dosStart(meta, file) {
+  const ext = extOf(meta.name);
+  const bytes = async blob => new Uint8Array(await blob.arrayBuffer());
+  if (ext !== 'zip' && ext !== 'jsdos') {
+    const name = dosName(meta.name);
+    const disk = await buildZip([{ name, blob: file, date: new Date() }]);
+    return { files: [await bytes(disk)], conf: DOS_CONF + name + '\n' };
+  }
+  const entries = (await readZip(file))
+    .map(e => Object.assign(e, { path: e.name.replace(/\\/g, '/') }))
+    .filter(e => !e.path.endsWith('/') && !/(^|\/)(__MACOSX\/|\.DS_Store$)/.test(e.path));
+  if (entries.some(e => e.encrypted)) throw new Error('El .zip tiene contraseña. Descomprímelo y vuelve a comprimirlo sin ella.');
+  // Paquete de js-dos (.jsdos o .zip): trae su propia configuración.
+  const own = entries.find(e => e.path.toLowerCase() === '.jsdos/dosbox.conf');
+  if (own) return { files: [await bytes(file)], conf: await (await own.blob()).text() };
+
+  const programs = entries.filter(e => /\.(exe|com|bat)$/i.test(e.path));
+  if (!programs.length) throw new Error('No hay ningún programa de MS-DOS (.exe, .com o .bat) dentro del .zip.');
+  // Primero el que parece el juego; los instaladores y utilidades, al final.
+  const rank = path => (/(^|\/)(setup|install|instal|uninst|config|setsound|sound|patch)[^/]*$/i.test(path) ? 1 : 0) + path.split('/').length / 100;
+  programs.sort((a, b) => rank(a.path) - rank(b.path) || a.path.localeCompare(b.path));
+  let chosen = programs[0];
+  if (programs.length > 1) {
+    chosen = await menu('¿Qué programa quieres abrir?', programs.slice(0, 80).map(e => ({
+      label: e.path.split('/').pop(), sub: e.path.includes('/') ? e.path.slice(0, e.path.lastIndexOf('/')) : undefined, value: e,
+    })), 'Suele ser el que lleva el nombre del juego. SETUP o INSTALL sirven para configurar el sonido.');
+    if (!chosen) return null;
+  }
+
+  let files;
+  let target = chosen.path;
+  if (entries.every(e => e.path.split('/').every(isDosName))) {
+    files = [await bytes(file)];
+  } else {
+    // Nombres largos o con acentos: MS-DOS no los entiende, así que se acortan (8.3) en una copia temporal.
+    const paths = dosPaths(entries.map(e => e.path));
+    const list = [];
+    for (let i = 0; i < entries.length; i++) list.push({ name: paths[i], blob: await entries[i].blob(), date: new Date() });
+    files = [await bytes(await buildZip(list))];
+    target = paths[entries.indexOf(chosen)];
+  }
+  const dir = target.includes('/') ? target.slice(0, target.lastIndexOf('/')) : '';
+  return { files, conf: DOS_CONF + (dir ? `cd \\${dir.replace(/\//g, '\\')}\n` : '') + target.split('/').pop() + '\n' };
+}
+
+async function openDos(meta, file) {
+  let start;
+  try {
+    start = await dosStart(meta, file);
+    if (!start) return;
+    const saved = await loadDosChanges(meta.id);
+    if (saved) start.files.push(saved);
+  } catch (err) {
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+    return;
+  }
+  if (!locked) openPlayer(meta, 'dos.html', { type: 'start', ...start }, meta.id);
+}
+
+// Lo que el programa escribe en su disco (partidas, configuración…) se guarda cifrado junto a él.
+function dosSaveKey(id) { return `dos:${id}`; }
+async function loadDosChanges(id, key = masterKey) {
+  const sealed = await dbBlob(dosSaveKey(id));
+  return sealed ? new Uint8Array(await (await decryptBlob(sealed, key)).arrayBuffer()) : null;
+}
+async function storeDosChanges(id, changes, key) {
+  const files = new Map();
+  const add = async zip => {
+    for (const e of await readZip(new Blob([zip]))) {
+      // La configuración la pone el Baúl al abrir: solo se guardan los archivos del programa.
+      if (e.name.endsWith('/') || e.name.startsWith('.jsdos/')) continue;
+      files.set(e.name.toUpperCase(), { name: e.name, blob: await e.blob(), date: new Date() });
+    }
+  };
+  await add(changes);
+  if (!files.size) return;
+  const fresh = new Map(files);
+  files.clear();
+  const before = await loadDosChanges(id, key);
+  if (before) await add(before);
+  for (const [k, v] of fresh) files.set(k, v);
+  const sealed = await encryptBlob(await buildZip([...files.values()]), key);
+  // Solo si el programa sigue en el baúl (pudo borrarse mientras tanto).
+  await tx(['meta', 'blobs'], 'readwrite', (m, b) => {
+    const g = m.get(id);
+    g.onsuccess = () => { if (g.result) b.put(sealed, dosSaveKey(id)); };
+  });
+}
+
+// Formas reales de usar en el iPhone programas de Windows y apps de Android (fuera del Baúl).
+const WAYS = {
+  windows: {
+    title: 'Programas de Windows en el iPhone',
+    note: 'El iPhone no puede ejecutar un .exe de Windows por sí solo (los de MS-DOS sí se abren aquí mismo). Estas son las formas que existen:',
+    options: [
+      { label: 'Desde tu PC con Windows', sub: 'Pásale el archivo con «Abrir en otra app» y maneja el PC desde el iPhone con Windows App (Microsoft, gratis)', href: 'https://apps.apple.com/app/id1295203466' },
+      { label: 'Juegos de tu PC, en el iPhone', sub: 'Steam Link (gratis): juega por wifi a lo que tengas en el PC', href: 'https://apps.apple.com/app/id1246969117' },
+      { label: 'Cualquier juego de tu PC', sub: 'Moonlight (gratis), con Sunshine instalado en el PC. Mejor con un mando', href: 'https://apps.apple.com/app/id1000551566' },
+      { label: 'Juegos de PC en la nube, sin PC', sub: 'GeForce NOW en Safari: juegos de Steam o Epic que tengas comprados', href: 'https://play.geforcenow.com' },
+      { label: 'Windows antiguo dentro del iPhone', sub: 'UTM SE (gratis): emula un PC con Windows 95, 98 o XP. Lento, y necesitas tu propia copia de Windows', href: 'https://apps.apple.com/app/id1564628856' },
+    ],
+  },
+  android: {
+    title: 'Apps de Android en el iPhone',
+    note: 'iOS no puede instalar archivos .apk. Antes de nada, busca si la app o el juego está en la App Store. Si no, estas son las formas:',
+    options: [
+      { label: 'Android en la nube', sub: 'Appetize.io: subes el .apk y lo usas en Safari. Gratis con minutos limitados (el archivo sale de tu iPhone)', href: 'https://appetize.io' },
+      { label: 'Desde tu PC', sub: 'Instala el .apk en un emulador como BlueStacks y maneja el PC desde el iPhone con Escritorio remoto de Chrome', href: 'https://remotedesktop.google.com/access' },
+    ],
+  },
+};
+function waysButton(kind) {
+  const b = el('button', 'open', 'Cómo usarlo en el iPhone');
+  b.onclick = () => menu(WAYS[kind].title, WAYS[kind].options, WAYS[kind].note);
+  return b;
+}
+
+// Archivos que usan los emuladores en este dispositivo, para descargarlos y poder jugar sin internet.
 const EMU_DATA = 'vendor/emulatorjs/data/';
 const EMU_CORES = { fceumm: false, snes9x: false, gambatte: false, mgba: false, genesis_plus_gx: false, pcsx_rearmed: true, melonds: true };
 function emulatorFiles() {
@@ -1832,6 +2062,8 @@ function emulatorFiles() {
   for (const [core, usesWebgl2] of Object.entries(cores)) {
     files.push(`${EMU_DATA}cores/reports/${core}.json`, `${EMU_DATA}cores/${core}${usesWebgl2 && webgl2 ? '' : '-legacy'}-wasm.data`);
   }
+  files.push('dos.html', 'vendor/jsdos/js-dos.js', 'vendor/jsdos/js-dos.css',
+    ...['emulators.js', 'wdosbox.js', 'wdosbox.wasm', 'wlibzip.js', 'wlibzip.wasm'].map(f => `vendor/jsdos/emulators/${f}`));
   return files;
 }
 
@@ -2101,7 +2333,7 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
   });
 }
 function renderGamesOffline() {
-  $('#gamesOffline .val').textContent = prefs.get('baul.gamesOffline', '') === APP_VERSION ? 'Listo ✓' : '≈ 10 MB';
+  $('#gamesOffline .val').textContent = prefs.get('baul.gamesOffline', '') === APP_VERSION ? 'Listo ✓' : '≈ 12 MB';
 }
 $('#gamesOffline').addEventListener('click', async () => {
   if (busy) return;
