@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Nada sale a internet: el juego solo puede leer los archivos de la propia app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; media-src 'self' blob: data:">
+  <title>Flash</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #player, #player > * { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="player"></div>
+  <script>
+    // Ruffle falla al arrancar si el navegador declara un idioma que Intl no entiende: se dejan solo los válidos.
+    try {
+      const valid = (navigator.languages || []).filter(l => { try { return !!Intl.getCanonicalLocales(l).length; } catch { return false; } });
+      Object.defineProperty(navigator, 'languages', { get: () => (valid.length ? valid : ['es-ES']) });
+      if (!valid.includes(navigator.language)) Object.defineProperty(navigator, 'language', { get: () => (valid[0] || 'es-ES') });
+    } catch { /* nada */ }
+    // Ruffle (emulador de Flash en WebAssembly): sin conexión, sin abrir otras páginas y sin su menú.
+    window.RufflePlayer = window.RufflePlayer || {};
+    window.RufflePlayer.config = {
+      publicPath: 'vendor/ruffle-0.7.1/',
+      // El .swf no puede ejecutar código de la página (ExternalInterface), aunque venga de la copia temporal.
+      allowScriptAccess: false,
+      polyfills: false,
+      autoplay: 'on',
+      unmuteOverlay: 'hidden',
+      splashScreen: false,
+      letterbox: 'on',
+      openUrlMode: 'deny',
+      showSwfDownload: false,
+      warnOnUnsupportedContent: false,
+      contextMenu: 'rightClickOnly',
+      logLevel: 'error',
+    };
+  </script>
+  <script src="vendor/ruffle-0.7.1/ruffle.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    // Página aislada para Flash: el Baúl le pasa el .swf (o la dirección de la copia temporal, en los .apk de Adobe AIR).
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      if (e.data?.type === 'start') start(e.data).catch(err => parent.postMessage({ type: 'exit', code: 1, errors: [String(err.message || err)] }, location.origin));
+      // Ruffle escribe las partidas (SharedObject) al cerrar la página; al quitar el visor se lo pedimos a mano.
+      if (e.data?.type === 'save') {
+        window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false }));
+        setTimeout(() => parent.postMessage({ type: 'saved' }, location.origin), 300);
+      }
+    });
+
+    async function start({ swf, name, url }) {
+      const player = window.RufflePlayer.newest().createPlayer();
+      document.getElementById('player').append(player);
+      // Sin salir del Baúl: fuera el aviso de «aceleración por hardware» (solo en equipos sin gráfica) y los enlaces
+      // a otras páginas del aviso de error. Si Ruffle falla, se cierra el visor y el Baúl explica el motivo.
+      const shadow = player.shadowRoot;
+      if (shadow) {
+        const css = document.createElement('style');
+        css.textContent = '#hardware-acceleration-modal { display: none !important; } #panic-footer a:not([href="#"]) { display: none !important; }';
+        shadow.append(css);
+        new MutationObserver((_, observer) => {
+          const panic = shadow.getElementById('panic');
+          if (!panic) return;
+          observer.disconnect();
+          const text = panic.querySelector('#panic-body')?.textContent.trim();
+          parent.postMessage({ type: 'exit', code: 1, errors: [text || 'Flash no pudo abrir este archivo'] }, location.origin);
+        }).observe(shadow, { childList: true, subtree: true });
+      }
+      // Según la versión de Ruffle, load() está en player.ruffle() o en el propio reproductor.
+      const api = typeof player.ruffle === 'function' ? player.ruffle() : player;
+      if (url) await api.load({ url });
+      else await api.load({ data: new Uint8Array(await swf.arrayBuffer()), swfFileName: name || 'juego.swf' });
+      parent.postMessage({ type: 'started' }, location.origin);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  })();
+  </script>
+</body>
+</html>

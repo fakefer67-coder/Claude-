@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Nada sale a internet: el juego solo puede leer los archivos de la propia app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; media-src 'self' blob: data:">
+  <title>LÖVE</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; touch-action: none; }
+    body { display: flex; align-items: center; justify-content: center; }
+    canvas { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+  <script>
+  (() => {
+    'use strict';
+    // Página aislada para LÖVE (love.js, versión sin hilos): el Baúl le pasa el juego (.love) y la cierra al salir.
+    const BASE = 'vendor/love-11.4/';
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      if (e.data?.type === 'start') start(e.data).catch(err => parent.postMessage({ type: 'exit', code: 1, errors: [String(err.message || err)] }, location.origin));
+      // love.js guarda las partidas en IndexedDB al cerrar la página («beforeunload»), pero al quitar el visor no
+      // hay cierre de página: se lo pedimos a mano y se da un momento para que termine de escribir.
+      if (e.data?.type === 'save') {
+        window.dispatchEvent(new Event('beforeunload'));
+        setTimeout(() => parent.postMessage({ type: 'saved' }, location.origin), 500);
+      }
+    });
+
+    async function start({ game }) {
+      const bytes = new Uint8Array(await game.arrayBuffer());
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = BASE + 'love.js';
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('No se pudo cargar LÖVE'));
+        document.body.append(s);
+      });
+      const errors = [];
+      await window.Love({
+        arguments: ['./game.love'],
+        INITIAL_MEMORY: 64 * 1024 * 1024,
+        canvas: document.getElementById('canvas'),
+        locateFile: path => BASE + path,
+        printErr: (...args) => { errors.push(args.join(' ')); if (errors.length > 20) errors.shift(); },
+        preRun: [m => m.FS_createDataFile('/', 'game.love', bytes, true, true, true)],
+        onExit: code => parent.postMessage({ type: 'exit', code, errors: code ? errors.slice(-6) : [] }, location.origin),
+        setStatus: () => {},
+        monitorRunDependencies: () => {},
+      });
+      parent.postMessage({ type: 'started' }, location.origin);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  })();
+  </script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 
 /* ================= Utilidades ================= */
 
@@ -332,7 +332,7 @@ const gameSystemOf = name => GAME_BY_EXT[extOf(name)];
 // Programas de MS-DOS: se ejecutan dentro del baúl con js-dos (DOSBox). Un .exe puede ser de MS-DOS o de Windows.
 const DOS_EXTS = new Set(['exe', 'com', 'bat', 'jsdos']);
 // Juegos y programas que se pueden abrir aquí o llevar a otro sistema.
-const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks', 'pck']);
+const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks', 'pck', 'love', 'swf']);
 
 // Programas de otros sistemas: se pueden guardar, y hay formas de usarlos desde el iPhone (ver «WAYS»).
 const WINDOWS_APP = 'Es un programa de Windows: no se abre aquí, pero sí con otras apps del iPhone, desde tu PC o desde la nube.';
@@ -356,6 +356,7 @@ const FILE_STYLE = {
   yml: ['YML', '#c9b3e8'], epub: ['EPUB', '#c9b3e8'],
   exe: ['EXE', '#b9c4ea'], com: ['DOS', '#b9c4ea'], bat: ['DOS', '#b9c4ea'], jsdos: ['DOS', '#b9c4ea'],
   apk: ['APK', '#a6d4b9'], xapk: ['APK', '#a6d4b9'], apks: ['APK', '#a6d4b9'], pck: ['PCK', '#b9c4ea'],
+  love: ['LÖVE', '#e8a3c9'], swf: ['SWF', '#e8a3a1'],
 };
 function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
@@ -1790,15 +1791,22 @@ function otherView(meta, file) {
     const slot = el('div');
     box.append(slot);
     inspectApp(meta, file).catch(() => ({})).then(info => {
-      if (info.page || info.godot || info.renpy) {
+      if (info.page || info.godot || info.renpy || info.love || info.flash) {
         const run = el('button', 'play', 'Ejecutar');
-        run.onclick = () => (info.godot ? openGodot(meta, info) : info.renpy ? openRenpy(meta, info) : openWebApp(meta, file, info));
-        const what = info.godot ? `Juego hecho con Godot ${info.version}` : info.renpy ? `Novela visual hecha con Ren'Py ${info.version}` : 'App web (HTML5)';
+        run.onclick = () => (info.godot ? openGodot(meta, info) : info.renpy ? openRenpy(meta, info)
+          : info.love ? openLove(meta, info) : info.flash ? openFlash(meta, info) : openWebApp(meta, file, info));
+        const what = info.godot ? `Juego hecho con Godot ${info.version}` : info.renpy ? `Novela visual hecha con Ren'Py ${info.version}`
+          : info.love ? 'Juego hecho con LÖVE' : info.flash ? 'Juego de Adobe AIR (Flash), experimental' : 'App web (HTML5)';
         slot.replaceWith(run, el('div', 's', `${what} · se abre aquí mismo`));
       } else {
         slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
       }
     });
+  }
+  if (ext === 'swf' || ext === 'love') {
+    const run = el('button', 'play', 'Ejecutar');
+    run.onclick = () => (ext === 'swf' ? openFlash(meta, { swf: file }) : openLove(meta, { love: file }));
+    box.append(run, el('div', 's', ext === 'swf' ? 'Juego o animación de Flash · se abre aquí mismo' : 'Juego hecho con LÖVE · se abre aquí mismo'));
   }
   if (ext === 'pck') {
     const slot = el('div');
@@ -1851,7 +1859,8 @@ function openGame(meta, system, file) {
 // Abre un emulador (página aislada) a pantalla completa y le pasa el juego cuando está listo.
 // `saveId`: las partidas de MS-DOS se guardan cifradas en el baúl, con la llave de esta sesión.
 // `web`: una app web (HTML5) servida desde la copia temporal; no puede salir del visor ni abrir ventanas.
-function openPlayer(meta, page, start, { saveId = null, web = false } = {}) {
+// `staged`: el juego se sirve desde la copia temporal descifrada, que se borra al cerrar.
+function openPlayer(meta, page, start, { saveId = null, web = false, staged = web } = {}) {
   closeGame(false);
   const frame = el('iframe');
   frame.title = meta.name;
@@ -1869,7 +1878,7 @@ function openPlayer(meta, page, start, { saveId = null, web = false } = {}) {
     if (e.data?.type === 'problems') toast('Este juego da errores al cargar: puede que no funcione bien');
   };
   window.addEventListener('message', onMessage);
-  emuSession = { frame, onMessage, saveId, web, key: masterKey };
+  emuSession = { frame, onMessage, saveId, web, staged, key: masterKey };
   $('#emuTitle').textContent = meta.name;
   $('#emuHost').replaceChildren(frame);
   emu.hidden = false;
@@ -1895,8 +1904,8 @@ async function closeGame(save = true) {
   }
   window.removeEventListener('message', session.onMessage);
   $('#emuHost').replaceChildren();
-  // La copia descifrada de la app web no se queda en el iPhone.
-  if (session.web) clearRunCache();
+  // La copia descifrada del juego no se queda en el iPhone.
+  if (session.staged) clearRunCache();
   emu.hidden = true;
   if (viewer.hidden) document.documentElement.classList.remove('noscroll');
 }
@@ -1909,7 +1918,7 @@ const clearGameSaves = () => Promise.all([
     r.onsuccess = r.onerror = r.onblocked = () => resolve();
   }),
   // Partidas de los juegos de Godot (su carpeta user://) y de Ren'Py.
-  ...['/userfs', '/home/web_user/.renpy'].map(name => new Promise(resolve => {
+  ...['/userfs', '/home/web_user/.renpy', '/home/web_user/love'].map(name => new Promise(resolve => {
     const r = indexedDB.deleteDatabase(name);
     r.onsuccess = r.onerror = r.onblocked = () => resolve();
   })),
@@ -2368,6 +2377,77 @@ async function openRenpy(meta, info) {
   if (!locked) openPlayer(meta, renpyPage(info.renpy), { type: 'start', runtime: info.renpy, zip });
 }
 
+/* ---- Juegos hechos con LÖVE (Lua) y con Flash / Adobe AIR ---- */
+
+// LÖVE en Android: el juego va en assets/game.love (o suelto en assets/, con su main.lua).
+function loveApkInfo(files) {
+  const love = files.find(e => /(^|\/)assets\/game\.love$/.test(e.name));
+  if (love) return { love };
+  if (!files.some(e => /\/liblove\.so$/.test(e.name))) return null;
+  const main = files.find(e => /(^|\/)assets\/main\.lua$/.test(e.name));
+  if (!main) return null;
+  const root = main.name.slice(0, -'main.lua'.length);
+  return { love: files.filter(e => e.name.startsWith(root)).map(e => ({ path: e.name.slice(root.length), entry: e })) };
+}
+
+async function openLove(meta, info) {
+  if (busy) return;
+  busy = true;
+  let game = info.love;
+  try {
+    if (Array.isArray(game)) {
+      // Juego suelto: se empaqueta como .love (un .zip con main.lua en la raíz).
+      const list = [];
+      for (let i = 0; i < game.length; i++) {
+        showProgress('Preparando el juego…', meta.name, i / game.length / 2);
+        list.push({ name: game[i].path, blob: await game[i].entry.blob(), date: new Date() });
+      }
+      game = await buildZip(list, (i, n) => showProgress('Preparando el juego…', meta.name, 0.5 + i / n / 2));
+    } else if (typeof game.blob === 'function') {
+      game = await game.blob();
+    }
+  } catch (err) {
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+    return;
+  } finally {
+    busy = false;
+    hideProgress();
+  }
+  if (!locked) openPlayer(meta, 'love.html', { type: 'start', game });
+}
+
+// Adobe AIR en Android: el .swf principal lo indica META-INF/AIR/application.xml, dentro de assets/.
+async function airApkInfo(files) {
+  const xml = files.find(e => /(^|\/)assets\/META-INF\/AIR\/application\.xml$/.test(e.name));
+  if (!xml) return null;
+  const root = xml.name.slice(0, -'META-INF/AIR/application.xml'.length);
+  const main = /<content>\s*([^<]+?)\s*<\/content>/.exec(await (await xml.blob()).text())?.[1];
+  if (!main) return null;
+  return { flash: true, root, main, files: files.filter(e => e.name.startsWith(root) && !e.name.startsWith(`${root}META-INF/`)) };
+}
+
+// Flash con Ruffle: un .swf suelto se le pasa tal cual; un juego de AIR se sirve desde la copia temporal.
+async function openFlash(meta, info) {
+  if (info.swf) {
+    // Ruffle guarda las partidas con el nombre del .swf: un identificador, para no dejar el nombre del juego sin cifrar.
+    openPlayer(meta, 'flash.html', { type: 'start', swf: info.swf, name: `${meta.id}.swf` });
+    return;
+  }
+  if (busy) return;
+  busy = true;
+  let base = null;
+  try {
+    base = await stageRunFiles(meta, info.files, info.root);
+  } catch (err) {
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+  } finally {
+    busy = false;
+    hideProgress();
+  }
+  if (!base || locked) await clearRunCache();
+  else openPlayer(meta, 'flash.html', { type: 'start', url: new URL(info.main, base).href }, { staged: true });
+}
+
 /* ---- Apps y juegos web (HTML5): los .apk que llevan una web dentro, o un .zip con un index.html ---- */
 
 // Con qué está hecho un .apk que no es web (y por tanto necesita Android de verdad).
@@ -2389,11 +2469,11 @@ function nativeApkReason(engine) {
   if (engine === 'Godot 2') return 'Está hecho con Godot 2, una versión muy antigua del motor que el Baúl todavía no puede abrir (sí abre los de Godot 3 y 4).';
   const what = engine ? `Está hecha con ${engine}` : 'Es una app nativa de Android';
   return `${what}: necesita Android de verdad, y Safari no deja ejecutar ese código en el iPhone. ` +
-    'El Baúl abre por dentro las apps y juegos de Android hechos con tecnología web (HTML5), y este no lo es.';
+    'El Baúl abre por dentro los juegos de Android hechos con Godot, Ren\'Py, LÖVE, Flash (Adobe AIR) o tecnología web (HTML5), y este no lo es.';
 }
 
-// Qué trae un .apk (también dentro de .xapk/.apks, que llevan varios .apk) o un .zip:
-// un juego de Godot, una web (HTML5), o una app nativa que necesita Android.
+// Qué trae un .apk (también dentro de .xapk/.apks, que llevan varios .apk) o un .zip: un juego de Godot, Ren'Py,
+// LÖVE o Adobe AIR, una web (HTML5), o una app nativa que necesita Android.
 async function inspectApp(meta, file) {
   let entries = await readZip(file);
   if (!entries.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name))) {
@@ -2416,6 +2496,10 @@ async function inspectApp(meta, file) {
     if (godot) return godot;
     const renpy = await renpyApkInfo(files);
     if (renpy) return renpy;
+    const love = loveApkInfo(files);
+    if (love) return love;
+    const air = await airApkInfo(files);
+    if (air) return air;
   }
   const engine = APK_ENGINES.find(([re]) => files.some(e => re.test(e.name)))?.[1];
   if (isApp && engine) return { engine };
@@ -2436,7 +2520,33 @@ function runUrl(href) {
 }
 const RUN_CACHE = 'baul-run';
 const clearRunCache = () => (self.caches ? caches.delete(RUN_CACHE).catch(() => {}) : Promise.resolve());
-const WEB_MIME = { ...EXT_MIME, wasm: 'application/wasm', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mid: 'audio/midi', midi: 'audio/midi' };
+const WEB_MIME = { ...EXT_MIME, wasm: 'application/wasm', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mid: 'audio/midi', midi: 'audio/midi', swf: 'application/x-shockwave-flash' };
+
+// Copia los archivos descifrados de una app a la caché temporal (se borra al cerrar) y devuelve su dirección.
+// A las páginas HTML se les añade apk-shim.js antes que cualquier script de la app.
+async function stageRunFiles(meta, files, root) {
+  await clearRunCache();
+  const cache = await caches.open(RUN_CACHE);
+  const base = new URL(`run/${meta.id}/`, location.href);
+  const shim = `<script src="${new URL('apk-shim.js', location.href).href}"></script>`;
+  for (let i = 0; i < files.length; i++) {
+    if (locked) return null;
+    showProgress('Preparando la app…', meta.name, i / files.length);
+    const path = files[i].name.slice(root.length);
+    const ext = extOf(path);
+    let blob = await files[i].blob();
+    let type = WEB_MIME[ext] || 'application/octet-stream';
+    if (ext === 'html' || ext === 'htm') {
+      const html = await blob.text();
+      const head = /<head[^>]*>/i.exec(html) || /<!doctype[^>]*>/i.exec(html);
+      const at = head ? head.index + head[0].length : 0;
+      type = 'text/html; charset=utf-8';
+      blob = new Blob([html.slice(0, at), shim, html.slice(at)]);
+    }
+    await cache.put(runUrl(new URL(path.replace(/[?#%]/g, encodeURIComponent), base).href), new Response(blob, { headers: { 'Content-Type': type } }));
+  }
+  return base;
+}
 
 // Copia la web descifrada a una caché temporal (se borra al cerrar) y la abre en el visor.
 async function openWebApp(meta, file, info = null) {
@@ -2450,30 +2560,9 @@ async function openWebApp(meta, file, info = null) {
     info ??= await inspectApp(meta, file);
     if (!info.page) throw new Error(info.engine !== undefined || ANDROID_EXTS.has(extOf(meta.name))
       ? nativeApkReason(info.engine) : 'No hay ningún index.html dentro del .zip.');
-    await clearRunCache();
-    const cache = await caches.open(RUN_CACHE);
-    const base = new URL(`run/${meta.id}/`, location.href);
-    const shim = `<script src="${new URL('apk-shim.js', location.href).href}"></script>`;
-    for (let i = 0; i < info.files.length; i++) {
-      if (locked) { await clearRunCache(); return; }
-      showProgress('Preparando la app…', meta.name, i / info.files.length);
-      const entry = info.files[i];
-      const path = entry.name.slice(info.root.length);
-      const ext = extOf(path);
-      let blob = await entry.blob();
-      let type = WEB_MIME[ext] || 'application/octet-stream';
-      if (ext === 'html' || ext === 'htm') {
-        // El ayudante va antes que cualquier script de la app.
-        const html = await blob.text();
-        const head = /<head[^>]*>/i.exec(html) || /<!doctype[^>]*>/i.exec(html);
-        const at = head ? head.index + head[0].length : 0;
-        type = 'text/html; charset=utf-8';
-        blob = new Blob([html.slice(0, at), shim, html.slice(at)]);
-      }
-      await cache.put(runUrl(new URL(path.replace(/[?#%]/g, encodeURIComponent), base).href), new Response(blob, { headers: { 'Content-Type': type } }));
-    }
+    const base = await stageRunFiles(meta, info.files, info.root);
     hideProgress();
-    if (locked) await clearRunCache();
+    if (!base || locked) await clearRunCache();
     else openPlayer(meta, new URL(info.page, base).href, null, { web: true });
   } catch (err) {
     hideProgress();
@@ -2488,10 +2577,12 @@ async function openWebApp(meta, file, info = null) {
 // Partidas de las apps web: van en el almacenamiento de la app con el prefijo de su archivo (ver apk-shim.js).
 async function clearWebAppData(ids) {
   const mine = name => name?.startsWith('apk:') && (!ids || ids.some(id => name.startsWith(`apk:${id}:`)));
+  // Partidas de Flash: Ruffle las guarda como «servidor/ruta del .swf/nombre», y esa ruta lleva el identificador.
+  const flash = k => k?.startsWith(`${location.hostname}/`) && (!ids || ids.some(id => k.includes(`/${id}.swf/`) || k.includes(`/run/${id}/`)));
   try {
     for (let i = localStorage.length - 1; i >= 0; i--) {
       const k = localStorage.key(i);
-      if (mine(k)) localStorage.removeItem(k);
+      if (mine(k) || flash(k)) localStorage.removeItem(k);
     }
   } catch { /* sin almacenamiento */ }
   try {
@@ -2823,6 +2914,11 @@ const OFFLINE_PACKS = {
       'renpy.html', ...['renpy-pre.js', 'renpy.js', 'renpy.wasm', 'renpy.data', 'renpy-engine.zip'].map(f => `vendor/renpy-${RENPY_RUNTIMES[8]}/${f}`),
       ...['index.html', 'index.js', 'index.wasm', 'pyapp-data.js', 'pyapp.data', 'pythonhome-data.js', 'pythonhome.data', 'renpy-engine.zip'].map(f => `vendor/renpy-${RENPY_RUNTIMES[7]}/${f}`),
     ],
+  },
+  flashOffline: {
+    what: 'Flash y LÖVE', size: '≈ 12 MB',
+    files: () => ['flash.html', 'love.html', 'vendor/love-11.4/love.js', 'vendor/love-11.4/love.wasm',
+      ...['172de42e6619eac8f371.wasm', '878d548199cddef07035.wasm', 'core.ruffle.16d61072ac7fdc4d5013.js', 'core.ruffle.994eeef0a471a88cd0e3.js', 'ruffle.js'].map(f => `vendor/ruffle-0.7.1/${f}`)],
   },
   godotOffline: {
     what: 'el motor de Godot', size: '≈ 40 MB',
