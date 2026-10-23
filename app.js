@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 
 /* ================= Utilidades ================= */
 
@@ -1790,10 +1790,11 @@ function otherView(meta, file) {
     const slot = el('div');
     box.append(slot);
     inspectApp(meta, file).catch(() => ({})).then(info => {
-      if (info.page || info.godot) {
+      if (info.page || info.godot || info.renpy) {
         const run = el('button', 'play', 'Ejecutar');
-        run.onclick = () => (info.godot ? openGodot(meta, info) : openWebApp(meta, file, info));
-        slot.replaceWith(run, el('div', 's', info.godot ? `Juego hecho con Godot ${info.version} · se abre aquí mismo` : 'App web (HTML5) · se abre aquí mismo'));
+        run.onclick = () => (info.godot ? openGodot(meta, info) : info.renpy ? openRenpy(meta, info) : openWebApp(meta, file, info));
+        const what = info.godot ? `Juego hecho con Godot ${info.version}` : info.renpy ? `Novela visual hecha con Ren'Py ${info.version}` : 'App web (HTML5)';
+        slot.replaceWith(run, el('div', 's', `${what} · se abre aquí mismo`));
       } else {
         slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
       }
@@ -1907,11 +1908,11 @@ const clearGameSaves = () => Promise.all([
     const r = indexedDB.deleteDatabase('EmulatorJS-states');
     r.onsuccess = r.onerror = r.onblocked = () => resolve();
   }),
-  // Partidas de los juegos de Godot (su carpeta user://).
-  new Promise(resolve => {
-    const r = indexedDB.deleteDatabase('/userfs');
+  // Partidas de los juegos de Godot (su carpeta user://) y de Ren'Py.
+  ...['/userfs', '/home/web_user/.renpy'].map(name => new Promise(resolve => {
+    const r = indexedDB.deleteDatabase(name);
     r.onsuccess = r.onerror = r.onblocked = () => resolve();
-  }),
+  })),
   clearWebAppData(null),
 ]);
 
@@ -2277,6 +2278,96 @@ async function openGodotZip(meta, file) {
   else openGodot(meta, info);
 }
 
+/* ---- Novelas visuales hechas con Ren'Py (.apk): el motor web oficial de Ren'Py (ver renpy.html) ---- */
+
+// Motores web: uno para Ren'Py 8 (Python 3) y otro para Ren'Py 7 (Python 2). Cada uno abre su página.
+const RENPY_RUNTIMES = { 8: '8.5.3', 7: '7.8.7' };
+const renpyPage = runtime => (runtime.startsWith('7') ? `vendor/renpy-${runtime}/index.html` : 'renpy.html');
+
+// Lee un archivo de un .tar.gz (como private.mp3, donde Ren'Py guarda su código en Android) sin descomprimirlo entero.
+async function readTarGzFile(blob, wanted) {
+  const reader = blob.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  let buf = new Uint8Array(0);
+  let need = 512;
+  let pending = null; // { name, size }
+  const td = new TextDecoder();
+  for (;;) {
+    while (buf.length < need) {
+      const { done, value } = await reader.read();
+      if (done) return null;
+      const next = new Uint8Array(buf.length + value.length);
+      next.set(buf);
+      next.set(value, buf.length);
+      buf = next;
+    }
+    if (!pending) {
+      const header = buf.subarray(0, 512);
+      const name = td.decode(header.subarray(0, 100)).replace(/\0.*$/s, '');
+      if (!name) return null;
+      const prefix = td.decode(header.subarray(345, 500)).replace(/\0.*$/s, '');
+      const size = parseInt(td.decode(header.subarray(124, 136)).replace(/\0.*$/s, '').trim() || '0', 8);
+      buf = buf.subarray(512);
+      pending = { name: prefix ? `${prefix}/${name}` : name, size };
+      need = Math.ceil(size / 512) * 512;
+    } else {
+      if (pending.name === wanted) { reader.cancel(); return buf.subarray(0, pending.size); }
+      buf = buf.subarray(need);
+      pending = null;
+      need = 512;
+    }
+  }
+}
+
+// En un .apk de Ren'Py, el juego va en assets/x-game (a cada nombre se le añade «x-») y el motor en private.mp3.
+async function renpyApkInfo(files) {
+  const priv = files.find(e => /(^|\/)assets\/private\.mp3$/.test(e.name));
+  const root = priv ? priv.name.slice(0, -'private.mp3'.length) : null;
+  const game = root ? files.filter(e => e.name.startsWith(`${root}x-game/`)) : [];
+  if (!game.length) return null;
+  let version = '';
+  try {
+    const vc = await readTarGzFile(await priv.blob(), 'renpy/vc_version.py');
+    version = /version\s*=\s*u?['"](\d+\.\d+)/.exec(new TextDecoder().decode(vc || new Uint8Array()))?.[1] || '';
+  } catch { /* sin versión: se prueba con el motor actual */ }
+  const major = Number(version.split('.')[0]) || 8;
+  if (!RENPY_RUNTIMES[major]) return { engine: `Ren'Py ${version}` };
+  const unx = part => (part.startsWith('x-') ? part.slice(2) : part);
+  return {
+    renpy: RENPY_RUNTIMES[major],
+    version: version || '8',
+    files: game.map(e => ({ path: e.name.slice(root.length).split('/').map(unx).join('/'), entry: e })),
+  };
+}
+
+// Junta el motor (renpy/ y main.py de la misma versión) con los archivos del juego en el game.zip que espera la web.
+async function openRenpy(meta, info) {
+  if (busy) return;
+  busy = true;
+  let zip;
+  try {
+    showProgress('Preparando el juego…', meta.name, 0);
+    const res = await fetch(`vendor/renpy-${info.renpy}/renpy-engine.zip`);
+    if (!res.ok) throw new Error('No se pudo cargar el motor de Ren\'Py. Ábrelo una vez con internet para guardarlo en el iPhone.');
+    const engine = (await readZip(await res.blob())).filter(e => !e.name.endsWith('/'));
+    const list = [];
+    const total = engine.length + info.files.length;
+    for (const e of engine) list.push({ name: e.name, blob: await e.blob(), date: new Date() });
+    for (let i = 0; i < info.files.length; i++) {
+      showProgress('Preparando el juego…', meta.name, (engine.length + i) / total);
+      list.push({ name: info.files[i].path, blob: await info.files[i].entry.blob(), date: new Date() });
+    }
+    zip = await buildZip(list, (i, n) => showProgress('Preparando el juego…', meta.name, 0.5 + i / n / 2));
+  } catch (err) {
+    hideProgress();
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+    return;
+  } finally {
+    busy = false;
+    hideProgress();
+  }
+  if (!locked) openPlayer(meta, renpyPage(info.renpy), { type: 'start', runtime: info.renpy, zip });
+}
+
 /* ---- Apps y juegos web (HTML5): los .apk que llevan una web dentro, o un .zip con un index.html ---- */
 
 // Con qué está hecho un .apk que no es web (y por tanto necesita Android de verdad).
@@ -2294,6 +2385,7 @@ const APK_ENGINES = [
   [/(^|\/)META-INF\/AIR\//, 'Adobe AIR'],
 ];
 function nativeApkReason(engine) {
+  if (/^Ren'Py [1-6]/.test(engine || '')) return `Está hecha con ${engine}, una versión muy antigua que el Baúl todavía no puede abrir (sí abre las de Ren'Py 7 y 8).`;
   if (engine === 'Godot 2') return 'Está hecho con Godot 2, una versión muy antigua del motor que el Baúl todavía no puede abrir (sí abre los de Godot 3 y 4).';
   const what = engine ? `Está hecha con ${engine}` : 'Es una app nativa de Android';
   return `${what}: necesita Android de verdad, y Safari no deja ejecutar ese código en el iPhone. ` +
@@ -2306,9 +2398,14 @@ async function inspectApp(meta, file) {
   let entries = await readZip(file);
   if (!entries.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name))) {
     // Paquete con varios .apk dentro: el principal es el que trae la carpeta assets/.
-    for (const inner of entries.filter(e => /\.apk$/i.test(e.name))) {
+    const outer = entries;
+    for (const inner of outer.filter(e => /\.apk$/i.test(e.name))) {
       const sub = await readZip(await inner.blob());
       if (sub.some(e => /(^|\/)assets\//.test(e.name))) { entries = sub; break; }
+    }
+    // Los juegos grandes traen el resto de sus archivos en un .obb (otro .zip con la misma carpeta assets/).
+    for (const obb of outer.filter(e => /\.obb$/i.test(e.name))) {
+      entries = entries.concat(await readZip(await obb.blob()));
     }
   }
   const files = entries.filter(e => !e.name.endsWith('/') && !/(^|\/)__MACOSX\//.test(e.name));
@@ -2317,6 +2414,8 @@ async function inspectApp(meta, file) {
     if (files.some(e => /(^|\/)assets\/engine\.cfb$/.test(e.name))) return { engine: 'Godot 2' };
     const godot = await godotApkInfo(files);
     if (godot) return godot;
+    const renpy = await renpyApkInfo(files);
+    if (renpy) return renpy;
   }
   const engine = APK_ENGINES.find(([re]) => files.some(e => re.test(e.name)))?.[1];
   if (isApp && engine) return { engine };
@@ -2718,6 +2817,13 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
 const GODOT_RUNTIMES = ['3.6.3', '4.3', '4.4.1', '4.7.2'];
 const OFFLINE_PACKS = {
   gamesOffline: { what: 'emuladores', size: '≈ 12 MB', files: () => emulatorFiles() },
+  renpyOffline: {
+    what: "el motor de Ren'Py", size: '≈ 25 MB',
+    files: () => [
+      'renpy.html', ...['renpy-pre.js', 'renpy.js', 'renpy.wasm', 'renpy.data', 'renpy-engine.zip'].map(f => `vendor/renpy-${RENPY_RUNTIMES[8]}/${f}`),
+      ...['index.html', 'index.js', 'index.wasm', 'pyapp-data.js', 'pyapp.data', 'pythonhome-data.js', 'pythonhome.data', 'renpy-engine.zip'].map(f => `vendor/renpy-${RENPY_RUNTIMES[7]}/${f}`),
+    ],
+  },
   godotOffline: {
     what: 'el motor de Godot', size: '≈ 40 MB',
     files: () => ['godot.html', ...GODOT_RUNTIMES.flatMap(v => ['godot.js', 'godot.wasm', 'godot.audio.worklet.js', ...(v.startsWith('4') ? ['godot.audio.position.worklet.js'] : [])].map(f => `vendor/godot-${v}/${f}`))],

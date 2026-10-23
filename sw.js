@@ -1,6 +1,6 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v10';
+const CACHE = 'baul-v11';
 // Copia temporal de la app web que se está usando (la crea y la borra app.js).
 const RUN_CACHE = 'baul-run';
 const ASSETS = [
@@ -11,6 +11,7 @@ const ASSETS = [
   './emulator.html',
   './dos.html',
   './godot.html',
+  './renpy.html',
   './apk-shim.js',
   './icons/icon-180.png',
   './icons/icon-192.png',

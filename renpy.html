@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <!-- Nada sale a internet: el juego solo puede leer los archivos de la propia app. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' blob: data:; media-src 'self' blob: data:">
+  <title>Ren'Py</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; font-family: -apple-system, system-ui, sans-serif; }
+    #canvas, #overlayDiv { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+    #canvas { background: #000; }
+    #presplash { display: none; }
+    .visible { visibility: visible; opacity: 1; transition: opacity .1s linear; }
+    .hidden { visibility: hidden; opacity: 0; transition: visibility 0s .25s, opacity .25s linear; }
+    #statusDiv, #inputDiv { position: absolute; top: 0; left: 0; right: 0; margin: auto; width: 80%; min-width: 280px; padding: 10px; background: rgba(0, 0, 0, .75); border-radius: 0 0 12px 12px; }
+    #statusTextDiv { overflow: auto; max-height: 40vh; color: #ccc; font-size: 14px; }
+    #statusProgress { display: none; width: 100%; }
+    #inputPrompt { color: #eee; font-size: 130%; margin: 1em 0; }
+    #inputText { width: 100%; font-size: 150%; padding: 5px; background: inherit; color: #eee; box-sizing: border-box; }
+    #ContextContainer { position: absolute; left: 0; top: 0; color: #fff; }
+    #ContextContainer.shown { background: rgba(0, 0, 0, .6); border-radius: 0 0 10px 0; }
+    #ContextButton { display: inline-block; text-decoration: none; color: #ccc; font-size: 28px; cursor: pointer; user-select: none; padding: 6px 12px; opacity: .6; }
+    #ContextMenu a { display: block; color: #ddd; text-decoration: none; padding: 8px 14px; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <div id="overlayDiv"></div>
+  <img id="presplash" alt="">
+
+  <div id="ContextContainer">
+    <a id="ContextButton">&#8801;</a><br>
+    <div id="ContextMenu" style="display: none;">
+      <input id="ID_SavegamesImport" type="file" onchange="onSavegamesImport(this)" accept="application/zip" style="display: none">
+      <a href="javascript:document.getElementById('ID_SavegamesImport').click();">Importar partidas</a>
+      <a href="javascript:onSavegamesExport();">Exportar partidas</a>
+    </div>
+  </div>
+
+  <div id="statusDiv" class="hidden">
+    <div id="statusTextDiv"></div>
+    <progress id="statusProgress" value="0" max="100"></progress>
+  </div>
+
+  <div id="inputDiv" class="hidden">
+    <form id="inputForm">
+      <div id="inputPrompt"></div>
+      <input id="inputText" type="text">
+    </form>
+  </div>
+
+  <script>
+  (() => {
+    'use strict';
+    // Página aislada para el motor web oficial de Ren'Py: el Baúl le pasa el juego (game.zip) ya preparado.
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      if (e.data?.type === 'start') start(e.data).catch(err => parent.postMessage({ type: 'exit', code: 1, errors: [String(err.message || err)] }, location.origin));
+    });
+
+    const loadScript = src => new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('No se pudo cargar el motor de Ren\'Py'));
+      document.body.append(s);
+    });
+
+    async function start({ runtime, zip }) {
+      const base = `vendor/renpy-${runtime}/`;
+      // El motor descarga game.zip con fetch: aquí es un archivo en memoria, no una dirección de internet.
+      window.gameZipURL = URL.createObjectURL(zip);
+      window.Module = { locateFile: path => base + path };
+      await loadScript(base + 'renpy-pre.js');
+      await loadScript(base + 'renpy.js');
+      parent.postMessage({ type: 'started' }, location.origin);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  })();
+  </script>
+</body>
+</html>
