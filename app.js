@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.0';
 
 /* ================= Utilidades ================= */
 
@@ -311,6 +311,36 @@ function kindOf(type, name = '') {
 const ALREADY_COMPRESSED = /^(image\/(jpeg|png|gif|webp|heic|heif|avif)|video\/|audio\/(mpeg|mp4|aac|ogg|x-m4a|webm|flac)|application\/(zip|epub\+zip|x-7z-compressed|vnd\.rar|gzip|vnd\.openxmlformats|x-iwork))/;
 
 const CODE_EXTS = new Set(['js', 'mjs', 'jsx', 'tsx', 'vue', 'py', 'rb', 'php', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'go', 'rs', 'sh', 'zsh', 'bash', 'sql', 'css', 'html', 'htm']);
+// Juegos de consolas clásicas que se pueden jugar con el emulador integrado (EmulatorJS).
+const GAME_SYSTEMS = {
+  nes: { name: 'NES', label: 'NES', exts: ['nes', 'fds', 'unf', 'unif'] },
+  snes: { name: 'Super Nintendo', label: 'SNES', exts: ['sfc', 'smc', 'fig', 'swc', 'bs'] },
+  gb: { name: 'Game Boy / Color', label: 'GB', exts: ['gb', 'gbc', 'sgb'] },
+  gba: { name: 'Game Boy Advance', label: 'GBA', exts: ['gba', 'agb'] },
+  segaMD: { name: 'Mega Drive / Genesis', label: 'MD', exts: ['gen', 'smd'] },
+  segaMS: { name: 'Master System', label: 'SMS', exts: ['sms'] },
+  segaGG: { name: 'Game Gear', label: 'GG', exts: ['gg'] },
+  n64: { name: 'Nintendo 64', label: 'N64', exts: ['n64', 'z64', 'v64'] },
+  psx: { name: 'PlayStation', label: 'PS1', exts: ['pbp'] },
+  nds: { name: 'Nintendo DS', label: 'NDS', exts: ['nds'] },
+};
+const GAME_BY_EXT = Object.fromEntries(Object.entries(GAME_SYSTEMS).flatMap(([key, s]) => s.exts.map(e => [e, key])));
+// Formatos que pueden ser un juego (o no): se ofrece elegir la consola.
+const MAYBE_GAME_EXTS = new Set(['zip', '7z', 'rar', 'bin', 'iso', 'img', 'chd', 'cue']);
+const gameSystemOf = name => GAME_BY_EXT[extOf(name)];
+
+// Programas de otros sistemas: se pueden guardar, pero un iPhone no puede ejecutarlos.
+const WINDOWS_APP = 'Es un programa de Windows: un iPhone no puede ejecutarlo. Puedes guardarlo aquí y pasarlo a un ordenador con «Guardar».';
+const ANDROID_APP = 'Es una app de Android: no se puede instalar en un iPhone. Puedes guardarla aquí y pasarla a un móvil Android con «Guardar».';
+const FOREIGN_APPS = {
+  exe: WINDOWS_APP, msi: WINDOWS_APP, bat: WINDOWS_APP,
+  apk: ANDROID_APP, xapk: ANDROID_APP, apks: ANDROID_APP, aab: ANDROID_APP,
+  ipa: 'Es una app de iPhone: iOS solo deja instalar apps desde la App Store, no desde archivos.',
+  dmg: 'Es un programa de Mac: un iPhone no puede ejecutarlo.', pkg: 'Es un instalador de Mac: un iPhone no puede ejecutarlo.',
+  deb: 'Es un programa de Linux: un iPhone no puede ejecutarlo.', appimage: 'Es un programa de Linux: un iPhone no puede ejecutarlo.',
+  jar: 'Es un programa Java: un iPhone no puede ejecutarlo.',
+};
+
 // Etiqueta de cada tipo, con un tono apagado para distinguirlos de un vistazo.
 const FILE_STYLE = {
   pdf: ['PDF', '#e8a3a1'], doc: ['DOC', '#a3b8e8'], docx: ['DOC', '#a3b8e8'], pages: ['PAGES', '#e8c3a1'],
@@ -324,6 +354,7 @@ function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
   const ext = extOf(meta.name);
   let [label, color] = FILE_STYLE[ext] || (CODE_EXTS.has(ext) ? ['</>', '#a3b8e8'] : [(ext || 'FILE').slice(0, 4).toUpperCase(), '']);
+  if (gameSystemOf(meta.name)) [label, color] = [GAME_SYSTEMS[gameSystemOf(meta.name)].label, '#b9c4ea'];
   if (meta.kind === 'audio') [label, color] = ['♪', '#c9b3e8'];
   if (meta.kind === 'video') [label, color] = ['▶', ''];
   if (meta.kind === 'image') [label, color] = ['IMG', ''];
@@ -1012,6 +1043,7 @@ function matchesFilter(m) {
   if (state.filter === 'image') return m.kind === 'image';
   if (state.filter === 'video') return m.kind === 'video';
   if (state.filter === 'file') return m.kind !== 'image' && m.kind !== 'video';
+  if (state.filter === 'game') return !!gameSystemOf(m.name);
   return true;
 }
 
@@ -1711,10 +1743,96 @@ function otherView(meta, file) {
     a.src = view.url;
     box.append(a);
   }
+  const system = gameSystemOf(meta.name);
+  if (system) {
+    const play = el('button', 'play', 'Jugar');
+    play.onclick = () => openGame(meta, system, file);
+    box.append(play, el('div', 's', `Emulador de ${GAME_SYSTEMS[system].name}`));
+  } else if (MAYBE_GAME_EXTS.has(extOf(meta.name))) {
+    const play = el('button', 'open', 'Jugar con un emulador…');
+    play.onclick = () => chooseSystemAndPlay(meta, file);
+    box.append(play);
+  }
+  const foreign = FOREIGN_APPS[extOf(meta.name)];
+  if (foreign) box.append(el('p', 'why', foreign));
   const open = el('button', 'open', 'Abrir en otra app');
   open.onclick = () => shareFiles([file]);
   box.append(open);
   return box;
+}
+
+/* ---- Juegos: emulador integrado ---- */
+
+const emu = $('#emu');
+let emuSession = null;
+
+async function chooseSystemAndPlay(meta, file) {
+  const system = await menu('¿De qué consola es el juego?', Object.entries(GAME_SYSTEMS).map(([key, s]) => ({ label: s.name, value: key })),
+    'Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.');
+  if (system) openGame(meta, system, file);
+}
+
+function openGame(meta, system, file) {
+  closeGame(false);
+  const frame = el('iframe');
+  frame.title = meta.name;
+  frame.allow = 'autoplay; gamepad; fullscreen';
+  frame.src = 'emulator.html';
+  // El emulador guarda sus partidas con este nombre: un identificador, para no dejar el nombre del juego sin cifrar.
+  const gameName = `${meta.id}.${extOf(meta.name) || 'rom'}`;
+  const onMessage = e => {
+    if (e.source !== frame.contentWindow || e.origin !== location.origin) return;
+    if (e.data?.type === 'ready') frame.contentWindow.postMessage({ type: 'start', core: system, game: file, name: gameName }, location.origin);
+  };
+  window.addEventListener('message', onMessage);
+  emuSession = { frame, onMessage };
+  $('#emuTitle').textContent = meta.name;
+  $('#emuHost').replaceChildren(frame);
+  emu.hidden = false;
+  document.documentElement.classList.add('noscroll');
+}
+
+// Cierra el juego; antes pide al emulador que guarde la memoria del cartucho.
+async function closeGame(save = true) {
+  const session = emuSession;
+  if (!session) return;
+  emuSession = null;
+  if (save && session.frame.contentWindow) {
+    await new Promise(resolve => {
+      const done = e => { if (e.source === session.frame.contentWindow && e.data?.type === 'saved') finish(); };
+      const finish = () => { window.removeEventListener('message', done); clearTimeout(timer); resolve(); };
+      const timer = setTimeout(finish, 800);
+      window.addEventListener('message', done);
+      session.frame.contentWindow.postMessage({ type: 'save' }, location.origin);
+    });
+  }
+  window.removeEventListener('message', session.onMessage);
+  $('#emuHost').replaceChildren();
+  emu.hidden = true;
+  if (viewer.hidden) document.documentElement.classList.remove('noscroll');
+}
+$('#emuClose').addEventListener('click', () => closeGame());
+
+// Partidas guardadas por el emulador (van aparte, sin nombres de juegos): se borran al vaciar el baúl.
+const clearGameSaves = () => new Promise(resolve => {
+  const r = indexedDB.deleteDatabase('EmulatorJS-states');
+  r.onsuccess = r.onerror = r.onblocked = () => resolve();
+});
+
+// Archivos que usa el emulador en este dispositivo, para descargarlos y poder jugar sin internet.
+const EMU_DATA = 'vendor/emulatorjs/data/';
+const EMU_CORES = { fceumm: false, snes9x: false, gambatte: false, mgba: false, genesis_plus_gx: false, pcsx_rearmed: true, melonds: true };
+function emulatorFiles() {
+  const webgl2 = !!document.createElement('canvas').getContext('webgl2');
+  // Igual que EmulatorJS: en Safari de iPhone usa parallel_n64 para la N64.
+  const cores = { ...EMU_CORES, ...(isIOS ? { parallel_n64: false } : { mupen64plus_next: true }) };
+  const files = ['emulator.html', `${EMU_DATA}loader.js`, `${EMU_DATA}emulator.min.js`, `${EMU_DATA}emulator.min.css`,
+    `${EMU_DATA}localization/es-ES.json`, `${EMU_DATA}compression/extract7z.js`, `${EMU_DATA}compression/extractzip.js`,
+    `${EMU_DATA}compression/libunrar.js`, `${EMU_DATA}compression/libunrar.wasm`];
+  for (const [core, usesWebgl2] of Object.entries(cores)) {
+    files.push(`${EMU_DATA}cores/reports/${core}.json`, `${EMU_DATA}cores/${core}${usesWebgl2 && webgl2 ? '' : '-legacy'}-wasm.data`);
+  }
+  return files;
 }
 
 $('#vClose').addEventListener('click', closeViewer);
@@ -1912,7 +2030,7 @@ stage.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY));
 document.addEventListener('gesturestart', e => e.preventDefault());
 
 document.addEventListener('keydown', e => {
-  if (viewer.hidden || !$('#lock').hidden || document.querySelector('dialog[open]')) return;
+  if (viewer.hidden || !emu.hidden || !$('#lock').hidden || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') closeViewer();
   if (e.key === 'ArrowRight') step(1);
   if (e.key === 'ArrowLeft') step(-1);
@@ -1960,6 +2078,7 @@ $('#settingsBtn').addEventListener('click', () => {
   renderVideoPref();
   renderAutoLock();
   renderStorage();
+  renderGamesOffline();
   videoEncoderCodec().then(codec => {
     $('#videoSupport').textContent = codec
       ? `Este dispositivo comprime vídeo en ${CODEC_NAMES[codec] || codec} ✓`
@@ -1981,6 +2100,31 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
     renderQuality();
   });
 }
+function renderGamesOffline() {
+  $('#gamesOffline .val').textContent = prefs.get('baul.gamesOffline', '') === APP_VERSION ? 'Listo ✓' : '≈ 10 MB';
+}
+$('#gamesOffline').addEventListener('click', async () => {
+  if (busy) return;
+  busy = true;
+  const files = emulatorFiles();
+  try {
+    for (let i = 0; i < files.length; i++) {
+      showProgress('Descargando emuladores…', `${i + 1} de ${files.length}`, i / files.length);
+      const res = await fetch(files[i]);
+      if (!res.ok) throw new Error(`No se pudo descargar ${files[i].split('/').pop()}`);
+      await res.arrayBuffer();
+    }
+    prefs.set('baul.gamesOffline', APP_VERSION);
+    toast('Listo: ya puedes jugar sin internet');
+  } catch (err) {
+    ask({ title: 'No se pudo descargar', message: `${err.message || err}\n\nComprueba la conexión e inténtalo otra vez.`, cancel: null });
+  } finally {
+    busy = false;
+    hideProgress();
+    renderGamesOffline();
+  }
+});
+
 for (const b of document.querySelectorAll('#videoGroup .row')) {
   b.addEventListener('click', () => {
     videoPref = b.dataset.vq;
@@ -2181,6 +2325,7 @@ $('#wipeBtn').addEventListener('click', async () => {
   });
   if (!yes) return;
   await dbClear();
+  await clearGameSaves();
   settings.close();
   state.folder = null;
   await refresh();
@@ -2370,6 +2515,7 @@ $('#lockForgot').addEventListener('click', async () => {
   });
   if (!sure) return;
   await dbWipeAll();
+  await clearGameSaves();
   resetFailures();
   state.folder = null;
   pinPad.cancel();
@@ -2393,6 +2539,7 @@ function lockNow() {
     void lockEl.offsetWidth;
     lockEl.classList.add('closing');
   }
+  closeGame();
   closeViewer();
   askCancel?.();
   menuCancel?.();

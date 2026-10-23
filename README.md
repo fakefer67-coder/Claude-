@@ -14,6 +14,7 @@ Todo se queda dentro del iPhone: no se sube nada a ningún servidor.
   - Vídeos: el iPhone ya los graba comprimidos, así que sin perder calidad no se pueden reducir más. Lo que sí puedes es **elegir la calidad**: al añadir un vídeo la app pregunta (Original, Alta 1080p, Media 720p o Ahorro 480p) y muestra cuánto ocupará cada opción; también puedes fijar una calidad por defecto en Ajustes o cambiar la de un vídeo ya guardado con el botón *Calidad* del visor. Se recodifica en el propio iPhone (HEVC o H.264 por hardware) y el audio se conserva tal cual. Tarda más o menos lo que dura el vídeo y necesita la app abierta (si sales, sigue al volver). Se guarda solo la versión comprimida.
   - Las fotos con transparencia y los GIF animados no se tocan.
 - **Código de acceso con candado animado**: al abrirla pide un código de 6 números; al acertarlo, el candado se abre y entras al baúl. Todo se guarda cifrado (AES-256) con él, incluidos los nombres de archivos y carpetas. Se bloquea sola al salir (al momento, tras 1 minuto o tras 5, a elegir) y con el candado de arriba. Tras 5 intentos fallidos hay que esperar. Si olvidas el código, los archivos no se pueden recuperar: solo queda borrar el baúl y empezar de cero.
+- **Juegos con emulador**: guarda tus juegos de NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Mega Drive, Master System, Game Gear, Nintendo 64, PlayStation o Nintendo DS (sueltos o dentro de un .zip/.7z) y ábrelos con *Jugar*: se juegan dentro de la app, con mando táctil, guardado de partidas y sin internet (en Ajustes → *Descargar emuladores para jugar sin internet*). Hay un filtro *Juegos*. Los programas de Windows (.exe) y las apps de Android (.apk) o de iPhone (.ipa) se pueden guardar, pero un iPhone no puede ejecutarlos: la app lo explica y permite pasarlos a otro dispositivo con *Guardar*.
 - **Visor**: fotos con pellizcar/doble toque para ampliar, deslizar para pasar y hacia abajo para cerrar; vídeos, audio, PDF y textos.
 - **Guardar en otra app**: el botón *Guardar* abre el menú de iOS (Guardar en Fotos, Guardar en Archivos, WhatsApp, Mail…). También para varios archivos a la vez con *Seleccionar*.
 - **Copia de seguridad**: Ajustes → *Exportar todo (.zip)* para guardarla en Archivos/iCloud Drive, y *Restaurar desde una copia* para recuperarla (incluye las carpetas y no duplica lo que ya está). La copia va cifrada: para restaurarla pide el código que tenías al hacerla.
@@ -43,10 +44,11 @@ La app es una web instalable (PWA): se publica una vez y se instala desde Safari
 | `app.js` | Compresión, cifrado, código de acceso, almacenamiento (IndexedDB), visor, compartir y copias de seguridad |
 | `sw.js` | Guarda la app en el iPhone para que abra sin internet |
 | `manifest.webmanifest`, `icons/` | Nombre e icono al instalarla |
+| `emulator.html`, `vendor/emulatorjs/` | [EmulatorJS](https://github.com/EmulatorJS/EmulatorJS) 4.2.3 (GPL-3.0, sin modificar: los scripts de `data/src` del paquete de npm, unidos en `emulator.min.js`) con los núcleos de RetroArch fceumm, snes9x, gambatte, mgba, genesis_plus_gx, pcsx_rearmed, mupen64plus_next, parallel_n64 y melonds; la licencia de cada núcleo va dentro de su archivo `.data` |
 | `vendor/mediabunny-1.61.3.min.mjs` | [Mediabunny](https://github.com/Vanilagy/mediabunny) 1.61.3 (MPL-2.0, sin modificar; licencia en `vendor/mediabunny-LICENSE.txt`) para recodificar vídeos |
 
 Requisitos: iOS 16.4 o superior (para la compresión sin pérdidas; en versiones anteriores funciona pero sin comprimir documentos).
 
-Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v5`). La app instalada se actualiza sola la próxima vez que se abre con internet.
+Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v7`). La app instalada se actualiza sola la próxima vez que se abre con internet.
 
 > El icono de la pantalla de inicio lo guarda iOS al instalar la app. Para ver un icono nuevo hay que quitar el Baúl de la pantalla de inicio y volver a añadirlo, y **quitarlo borra sus archivos**: exporta antes una copia de seguridad y restáurala después.

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Emulador</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0a0a0c; overflow: hidden; touch-action: none; }
+    #game { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+  <script>
+    'use strict';
+    // Página aislada para EmulatorJS: el Baúl le pasa el juego ya descifrado y la cierra al salir.
+    const DATA = 'vendor/emulatorjs/data/';
+
+    window.addEventListener('message', e => {
+      if (e.origin !== location.origin || e.source !== parent) return;
+      const msg = e.data || {};
+      if (msg.type === 'start') start(msg);
+      if (msg.type === 'save') save();
+    });
+
+    function start({ core, game, name }) {
+      Object.assign(window, {
+        EJS_player: '#game',
+        EJS_core: core,
+        EJS_gameUrl: game,
+        EJS_gameName: name,
+        EJS_pathtodata: DATA,
+        EJS_language: 'es-ES',
+        EJS_startButtonName: 'Jugar',
+        EJS_startOnLoaded: false,
+        // Sin copias del juego ni de los núcleos fuera del baúl cifrado.
+        EJS_disableDatabases: true,
+        EJS_backgroundColor: '#0a0a0c',
+        EJS_color: '#a1a1aa',
+        EJS_Buttons: { netplay: false, cacheManager: false, exitEmulation: false, fullscreen: false, screenRecord: false },
+        EJS_onGameStart: () => parent.postMessage({ type: 'started' }, location.origin),
+      });
+      const script = document.createElement('script');
+      script.src = DATA + 'loader.js';
+      document.body.append(script);
+    }
+
+    // Guarda la memoria del cartucho (partidas guardadas dentro del juego) antes de cerrar.
+    function save() {
+      try { window.EJS_emulator?.gameManager?.saveSaveFiles(); } catch { /* aún no había empezado */ }
+      parent.postMessage({ type: 'saved' }, location.origin);
+    }
+
+    parent.postMessage({ type: 'ready' }, location.origin);
+  </script>
+</body>
+</html>
