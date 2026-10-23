@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 /* ================= Utilidades ================= */
 
@@ -311,24 +311,24 @@ function kindOf(type, name = '') {
 const ALREADY_COMPRESSED = /^(image\/(jpeg|png|gif|webp|heic|heif|avif)|video\/|audio\/(mpeg|mp4|aac|ogg|x-m4a|webm|flac)|application\/(zip|epub\+zip|x-7z-compressed|vnd\.rar|gzip|vnd\.openxmlformats|x-iwork))/;
 
 const CODE_EXTS = new Set(['js', 'mjs', 'jsx', 'tsx', 'vue', 'py', 'rb', 'php', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'go', 'rs', 'sh', 'zsh', 'bash', 'sql', 'css', 'html', 'htm']);
+// Etiqueta de cada tipo, con un tono apagado para distinguirlos de un vistazo.
 const FILE_STYLE = {
-  pdf: ['PDF', '#a8383c'], doc: ['DOC', '#2f5aa8'], docx: ['DOC', '#2f5aa8'], pages: ['PAGES', '#b0661c'],
-  xls: ['XLS', '#25744a'], xlsx: ['XLS', '#25744a'], numbers: ['NUM', '#25744a'], csv: ['CSV', '#25744a'],
-  ppt: ['PPT', '#a8522c'], pptx: ['PPT', '#a8522c'], key: ['KEY', '#2f6aa8'],
-  zip: ['ZIP', '#4d475c'], gz: ['GZ', '#4d475c'], rar: ['RAR', '#4d475c'], '7z': ['7Z', '#4d475c'],
-  txt: ['TXT', '#4d475c'], md: ['MD', '#4d475c'], json: ['{ }', '#8a6a24'], geojson: ['{ }', '#8a6a24'],
-  xml: ['XML', '#6a4a8a'], yaml: ['YML', '#6a4a8a'], yml: ['YML', '#6a4a8a'], epub: ['EPUB', '#7a3f9e'],
+  pdf: ['PDF', '#e8a3a1'], doc: ['DOC', '#a3b8e8'], docx: ['DOC', '#a3b8e8'], pages: ['PAGES', '#e8c3a1'],
+  xls: ['XLS', '#a6d4b9'], xlsx: ['XLS', '#a6d4b9'], numbers: ['NUM', '#a6d4b9'], csv: ['CSV', '#a6d4b9'],
+  ppt: ['PPT', '#e8bba1'], pptx: ['PPT', '#e8bba1'], key: ['KEY', '#a3b8e8'],
+  zip: ['ZIP', ''], gz: ['GZ', ''], rar: ['RAR', ''], '7z': ['7Z', ''], txt: ['TXT', ''], md: ['MD', ''],
+  json: ['{ }', '#e3d39f'], geojson: ['{ }', '#e3d39f'], xml: ['XML', '#c9b3e8'], yaml: ['YML', '#c9b3e8'],
+  yml: ['YML', '#c9b3e8'], epub: ['EPUB', '#c9b3e8'],
 };
 function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
   const ext = extOf(meta.name);
-  let [label, color] = FILE_STYLE[ext] || (CODE_EXTS.has(ext) ? ['</>', '#3d5a8a'] : [(ext || 'FILE').slice(0, 4).toUpperCase(), '#4f4862']);
-  if (meta.kind === 'audio') [label, color] = ['♪', '#6f3f8f'];
-  if (meta.kind === 'video') [label, color] = ['▶', '#2c2836'];
-  if (meta.kind === 'image') [label, color] = ['IMG', '#2c2836'];
+  let [label, color] = FILE_STYLE[ext] || (CODE_EXTS.has(ext) ? ['</>', '#a3b8e8'] : [(ext || 'FILE').slice(0, 4).toUpperCase(), '']);
+  if (meta.kind === 'audio') [label, color] = ['♪', '#c9b3e8'];
+  if (meta.kind === 'video') [label, color] = ['▶', ''];
+  if (meta.kind === 'image') [label, color] = ['IMG', ''];
   icon.textContent = label;
-  icon.style.backgroundColor = color;
-  icon.style.backgroundImage = 'linear-gradient(160deg, rgba(255, 255, 255, .1), rgba(0, 0, 0, .25))';
+  if (color) icon.style.color = color;
   return icon;
 }
 
@@ -384,7 +384,7 @@ function hasTransparency(img) {
 }
 
 async function makeThumb(src) {
-  const c = drawScaled(src, 420, '#24212d');
+  const c = drawScaled(src, 420, '#1a1a1e');
   const blob = await canvasBlob(c, 'image/jpeg', 0.74);
   freeCanvas(c);
   return blob;
@@ -1098,6 +1098,7 @@ function renderStats() {
   if (!state.items.length && !state.folders.length) { statsEl.textContent = 'Sin internet · todo se queda en tu iPhone'; return; }
   const scope = state.folder ? treeIds(state.folder) : null;
   const files = scope ? state.items.filter(m => scope.has(folderOf(m))) : state.items;
+  if (!files.length) { statsEl.textContent = state.folder ? 'Carpeta vacía' : 'Solo carpetas, todavía sin archivos'; return; }
   const size = files.reduce((s, m) => s + m.size, 0);
   const stored = files.reduce((s, m) => s + m.storedSize, 0);
   statsEl.replaceChildren();
@@ -1136,12 +1137,15 @@ function fileTile(m) {
   } else {
     const doc = el('div', 'doc');
     doc.append(fileIcon(m), el('span', 'name', m.name));
+    // En los documentos el ahorro va debajo del nombre, para no taparlo.
+    if (!pending) doc.append(el('span', 'count', pct(m.size - m.storedSize, m.size) >= 5 ? `${fmtBytes(m.storedSize)} · ${minusPct(m.size - m.storedSize, m.size)}` : fmtBytes(m.storedSize)));
     tile.append(doc);
   }
+  const media = !!tile.querySelector('img');
   if (pending) {
     tile.classList.add('pending');
     tile.append(el('span', 'busy'));
-  } else if (pct(m.size - m.storedSize, m.size) >= 5) {
+  } else if (media && pct(m.size - m.storedSize, m.size) >= 5) {
     tile.append(el('span', 'pill save', minusPct(m.size - m.storedSize, m.size)));
   }
   tile.append(el('span', 'check'));
@@ -1177,8 +1181,9 @@ function render() {
   if (empty) {
     const searching = state.filter !== 'all' || state.query.trim();
     const inFolder = !!state.folder;
-    $('#emptyIcon').hidden = searching || inFolder;
-    $('#emptyFolder').hidden = searching || !inFolder;
+    $('#empty .art').hidden = searching;
+    $('#emptyIcon').hidden = inFolder;
+    $('#emptyFolder').hidden = !inFolder;
     $('#emptyTitle').textContent = searching ? 'Nada por aquí' : inFolder ? 'Carpeta vacía' : 'Tu baúl está vacío';
     $('#emptyText').textContent = searching
       ? 'No hay nada que coincida con este filtro o búsqueda.'

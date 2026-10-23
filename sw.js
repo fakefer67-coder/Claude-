@@ -1,6 +1,6 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v4';
+const CACHE = 'baul-v5';
 const ASSETS = [
   './',
   './index.html',
