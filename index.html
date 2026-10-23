@@ -53,7 +53,7 @@
       -webkit-user-select: none; user-select: none;
       touch-action: manipulation;
     }
-    html.lock, html.lock body { overflow: hidden; }
+    html.noscroll, html.noscroll body { overflow: hidden; }
     button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
     svg.i { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     [hidden] { display: none !important; }
@@ -66,7 +66,7 @@
       -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
       border-bottom: .5px solid var(--line);
     }
-    .title-row { display: flex; align-items: center; gap: 12px; }
+    .title-row { display: flex; align-items: center; gap: 8px; }
     .title-row h1 { margin: 0; font-size: 34px; font-weight: 800; letter-spacing: -.02em; flex: 1; display: flex; align-items: center; gap: 10px; }
     .title-row h1 img { width: 34px; height: 34px; border-radius: 9px; }
     .link-btn { color: var(--accent); font-weight: 600; font-size: 16px; padding: 6px 2px; }
@@ -222,6 +222,44 @@
     .dlg table { margin: 14px auto 0; font-size: 14px; border-collapse: collapse; text-align: left; }
     .dlg td { padding: 3px 6px; }
     .dlg td:first-child { color: var(--muted); }
+
+    /* ---- Código de acceso ---- */
+    .lock {
+      position: fixed; inset: 0; z-index: 100; color: #fff;
+      background: radial-gradient(130% 75% at 50% 0%, #3b2d5e 0%, #0f0c18 62%);
+      display: flex; align-items: center; justify-content: center;
+      padding: env(safe-area-inset-top) 24px env(safe-area-inset-bottom);
+    }
+    .lock-inner { width: 100%; max-width: 330px; display: flex; flex-direction: column; align-items: center; text-align: center; }
+    .lock-icon { width: 64px; height: 64px; border-radius: 15px; margin-bottom: 16px; box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
+    .lock h2 { margin: 0; font-size: 21px; font-weight: 600; min-height: 26px; }
+    .lock p { margin: 6px 0 0; min-height: 40px; font-size: 14px; color: rgba(255, 255, 255, .72); max-width: 290px; }
+    .lock p.err { color: #ff9a9d; }
+    .dots { display: flex; gap: 18px; margin: 14px 0 30px; }
+    .dots i { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid #fff; transition: background .1s; }
+    .dots i.on { background: #fff; }
+    .dots.shake { animation: shake .4s; }
+    @keyframes shake { 20%, 60% { transform: translateX(-10px); } 40%, 80% { transform: translateX(10px); } }
+    .keypad { display: grid; grid-template-columns: repeat(3, 78px); gap: 16px 26px; transition: opacity .2s; }
+    .keypad button {
+      width: 78px; height: 78px; border-radius: 50%; background: rgba(255, 255, 255, .14); color: #fff;
+      font-size: 34px; line-height: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      transition: background .12s;
+    }
+    .keypad button small { font-size: 10px; font-weight: 700; letter-spacing: .14em; margin-top: 3px; opacity: .85; }
+    .keypad button:active { background: rgba(255, 255, 255, .38); }
+    .keypad .kp-text { background: none; font-size: 16px; }
+    .keypad .kp-text:active { background: none; opacity: .6; }
+    .keypad.wait { opacity: .35; pointer-events: none; }
+    .lock-link { margin-top: 24px; color: rgba(255, 255, 255, .75); font-size: 15px; }
+    .lock .lock-hint { margin-top: 22px; min-height: 0; padding: 10px 14px; border-radius: 12px; background: rgba(243, 187, 74, .16); color: #ffd77e; font-size: 13px; }
+    @media (max-height: 680px) {
+      .lock-icon { display: none; }
+      .keypad { grid-template-columns: repeat(3, 68px); gap: 12px 24px; }
+      .keypad button { width: 68px; height: 68px; font-size: 30px; }
+    }
+    .cover { position: fixed; inset: 0; z-index: 99; background: #0f0c18; display: grid; place-items: center; }
+    .cover img { width: 96px; height: 96px; border-radius: 22px; }
   </style>
 </head>
 <body>
@@ -229,6 +267,9 @@
     <div class="title-row">
       <h1><img src="icons/icon-180.png" alt="">Baúl</h1>
       <button id="selectBtn" class="link-btn">Seleccionar</button>
+      <button id="lockBtn" class="icon-btn" aria-label="Bloquear">
+        <svg class="i" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      </button>
       <button id="settingsBtn" class="icon-btn" aria-label="Ajustes">
         <svg class="i" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></svg>
       </button>
@@ -289,12 +330,52 @@
     </div>
   </section>
 
+  <section id="lock" class="lock">
+    <div class="lock-inner">
+      <img src="icons/icon-180.png" alt="" class="lock-icon">
+      <h2 id="lockTitle"></h2>
+      <p id="lockSub"></p>
+      <div id="dots" class="dots"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div id="keypad" class="keypad wait">
+        <button data-k="1">1<small>&nbsp;</small></button>
+        <button data-k="2">2<small>ABC</small></button>
+        <button data-k="3">3<small>DEF</small></button>
+        <button data-k="4">4<small>GHI</small></button>
+        <button data-k="5">5<small>JKL</small></button>
+        <button data-k="6">6<small>MNO</small></button>
+        <button data-k="7">7<small>PQRS</small></button>
+        <button data-k="8">8<small>TUV</small></button>
+        <button data-k="9">9<small>WXYZ</small></button>
+        <button id="lockCancel" class="kp-text" style="visibility: hidden">Cancelar</button>
+        <button data-k="0">0</button>
+        <button data-k="del" class="kp-text" aria-label="Borrar">
+          <svg class="i" viewBox="0 0 24 24"><path d="M9 5h11a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H9l-6-7 6-7zM12 9l6 6M18 9l-6 6"/></svg>
+        </button>
+      </div>
+      <button id="lockForgot" class="lock-link" hidden>¿Olvidaste el código?</button>
+      <p id="lockHint" class="lock-hint" hidden>Consejo: instala primero el Baúl (Compartir → «Añadir a pantalla de inicio») y crea el código desde su icono. Lo que guardes en esta pestaña de Safari no aparecerá en la app instalada.</p>
+    </div>
+  </section>
+  <div id="cover" class="cover" hidden><img src="icons/icon-512.png" alt=""></div>
+
   <dialog id="settings" class="sheet">
     <div class="grabber"></div>
     <div class="sheet-head">
       <h2>Ajustes</h2>
       <button id="settingsClose" class="link-btn">Listo</button>
     </div>
+
+    <h3>Seguridad</h3>
+    <div class="group">
+      <button class="row btn" id="changePinBtn">Cambiar código<span class="grow"></span></button>
+    </div>
+    <h3>Bloquear automáticamente</h3>
+    <div class="group" role="radiogroup" id="autoLockGroup">
+      <button class="row" role="radio" data-lock="0"><span class="radio"></span><span class="grow">Al salir de la app</span></button>
+      <button class="row" role="radio" data-lock="60"><span class="radio"></span><span class="grow">Tras 1 minuto fuera</span></button>
+      <button class="row" role="radio" data-lock="300"><span class="radio"></span><span class="grow">Tras 5 minutos fuera</span></button>
+    </div>
+    <p class="note">Todo se guarda cifrado (AES-256) con tu código, incluidos los nombres de los archivos. Sin el código nadie puede verlos… ni tú: si lo olvidas, no se pueden recuperar.</p>
 
     <h3>Compresión de fotos</h3>
     <div class="group" role="radiogroup" id="qualityGroup">
@@ -317,7 +398,7 @@
       <button class="row btn" id="backupBtn">Exportar todo (.zip)<span class="grow"></span></button>
       <button class="row btn" id="restoreBtn">Restaurar desde una copia<span class="grow"></span></button>
     </div>
-    <p class="note">Si borras el icono del Baúl de la pantalla de inicio, iOS borra también sus archivos. Guarda de vez en cuando una copia en Archivos o iCloud Drive.</p>
+    <p class="note">La copia va cifrada: para restaurarla te pedirá el código que tenías al hacerla. Si borras el icono del Baúl de la pantalla de inicio, iOS borra también sus archivos, así que guarda de vez en cuando una copia en Archivos o iCloud Drive.</p>
 
     <h3>Peligro</h3>
     <div class="group">

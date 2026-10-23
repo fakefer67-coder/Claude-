@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 /* ================= Utilidades ================= */
 
@@ -31,16 +31,19 @@ const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platfor
 const isStandalone = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 
 /* ================= Base de datos (IndexedDB) ================= */
-// meta:   datos del archivo (nombre, tipo, tamaños...)
-// blobs:  contenido comprimido
-// thumbs: miniatura pequeña para la cuadrícula
+// meta:   datos del archivo (nombre, tipo, tamaños...), cifrados
+// blobs:  contenido comprimido y cifrado
+// thumbs: miniatura pequeña para la cuadrícula, cifrada
+// config: llave del baúl, protegida con el código
+
+const FILE_STORES = ['meta', 'blobs', 'thumbs'];
 
 let dbPromise;
 function db() {
   dbPromise ??= new Promise((resolve, reject) => {
-    const r = indexedDB.open('baul', 1);
+    const r = indexedDB.open('baul', 2);
     r.onupgradeneeded = () => {
-      for (const s of ['meta', 'blobs', 'thumbs']) {
+      for (const s of [...FILE_STORES, 'config']) {
         if (!r.result.objectStoreNames.contains(s)) r.result.createObjectStore(s);
       }
     };
@@ -62,19 +65,133 @@ async function tx(stores, mode, fn) {
   return r instanceof IDBRequest ? r.result : r;
 }
 
-const dbAllMeta = () => tx(['meta'], 'readonly', m => m.getAll());
+const dbGetConfig = () => tx(['config'], 'readonly', c => c.get('vault'));
+const dbSetConfig = cfg => tx(['config'], 'readwrite', c => { c.put(cfg, 'vault'); });
+const dbRawMetas = () => tx(['meta'], 'readonly', m => m.getAll());
 const dbBlob = id => tx(['blobs'], 'readonly', b => b.get(id));
 const dbThumb = id => tx(['thumbs'], 'readonly', t => t.get(id));
-const dbPutMeta = meta => tx(['meta'], 'readwrite', m => { m.put(meta, meta.id); });
-const dbPut = (meta, blob, thumb) => tx(['meta', 'blobs', 'thumbs'], 'readwrite', (m, b, t) => {
-  m.put(meta, meta.id);
-  b.put(blob, meta.id);
-  if (thumb) t.put(thumb, meta.id);
+const dbPutMeta = rec => tx(['meta'], 'readwrite', m => { m.put(rec, rec.id); });
+const dbPut = (rec, blob, thumb) => tx(FILE_STORES, 'readwrite', (m, b, t) => {
+  m.put(rec, rec.id);
+  b.put(blob, rec.id);
+  if (thumb) t.put(thumb, rec.id);
 });
-const dbDelete = ids => tx(['meta', 'blobs', 'thumbs'], 'readwrite', (m, b, t) => {
+const dbDelete = ids => tx(FILE_STORES, 'readwrite', (m, b, t) => {
   for (const id of ids) { m.delete(id); b.delete(id); t.delete(id); }
 });
-const dbClear = () => tx(['meta', 'blobs', 'thumbs'], 'readwrite', (m, b, t) => { m.clear(); b.clear(); t.clear(); });
+const dbClear = () => tx(FILE_STORES, 'readwrite', (m, b, t) => { m.clear(); b.clear(); t.clear(); });
+const dbWipeAll = () => tx([...FILE_STORES, 'config'], 'readwrite', (...stores) => { for (const st of stores) st.clear(); });
+
+/* ================= Cifrado ================= */
+// Una llave aleatoria AES-256-GCM cifra todo lo guardado. Esa llave se guarda cifrada con otra
+// derivada del código (PBKDF2), así cambiar el código no obliga a recifrar los archivos.
+
+const PIN_LENGTH = 6;
+const KDF_ITERATIONS = 600_000;
+const CHUNK = 4 * 1024 * 1024;
+const te = new TextEncoder();
+const td = new TextDecoder();
+let masterKey = null;
+
+async function deriveKek(pin, salt, iterations) {
+  const base = await crypto.subtle.importKey('raw', te.encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, base,
+    { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+  );
+}
+const importMaster = raw => crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['encrypt', 'decrypt']);
+
+async function sealBytes(bytes, key) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes));
+  const out = new Uint8Array(12 + ct.length);
+  out.set(iv);
+  out.set(ct, 12);
+  return out;
+}
+async function openBytes(sealed, key) {
+  return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.subarray(0, 12) }, key, sealed.subarray(12)));
+}
+const sealJSON = (obj, key) => sealBytes(te.encode(JSON.stringify(obj)), key);
+const openJSON = async (sealed, key) => JSON.parse(td.decode(await openBytes(sealed, key)));
+
+// Los archivos se cifran por trozos de 4 MB para no agotar la memoria del iPhone con vídeos grandes.
+// Formato: [prefijo aleatorio de 8 bytes][trozo 0 cifrado][trozo 1 cifrado]...
+function chunkIv(prefix, i) {
+  const iv = new Uint8Array(12);
+  iv.set(prefix);
+  new DataView(iv.buffer).setUint32(8, i);
+  return iv;
+}
+async function encryptBlob(blob, key) {
+  const prefix = crypto.getRandomValues(new Uint8Array(8));
+  const parts = [prefix];
+  let i = 0;
+  let off = 0;
+  do {
+    const plain = await blob.slice(off, off + CHUNK).arrayBuffer();
+    parts.push(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: chunkIv(prefix, i) }, key, plain));
+    off += CHUNK;
+    i++;
+  } while (off < blob.size);
+  return new Blob(parts);
+}
+async function decryptBlob(blob, key, type = '') {
+  const prefix = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+  const parts = [];
+  let i = 0;
+  let off = 8;
+  do {
+    const ct = await blob.slice(off, off + CHUNK + 16).arrayBuffer();
+    parts.push(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: chunkIv(prefix, i) }, key, ct));
+    off += CHUNK + 16;
+    i++;
+  } while (off < blob.size);
+  return new Blob(parts, { type });
+}
+
+async function wrapMaster(raw, pin) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const kek = await deriveKek(pin, salt, KDF_ITERATIONS);
+  return { salt, iterations: KDF_ITERATIONS, wrapped: await sealBytes(raw, kek) };
+}
+// Devuelve la llave en bruto si el código es correcto; si no, null.
+async function unwrapMaster(cfg, pin) {
+  try { return await openBytes(cfg.wrapped, await deriveKek(pin, cfg.salt, cfg.iterations)); } catch { return null; }
+}
+async function createVault(pin) {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  await dbSetConfig({ ...(await wrapMaster(raw, pin)), created: Date.now() });
+  masterKey = await importMaster(raw);
+  raw.fill(0);
+}
+async function unlockVault(pin) {
+  const raw = await unwrapMaster(await dbGetConfig(), pin);
+  if (!raw) return false;
+  masterKey = await importMaster(raw);
+  raw.fill(0);
+  return true;
+}
+
+const sealMeta = async meta => ({ id: meta.id, e: await sealJSON(meta, masterKey) });
+async function loadMetas() {
+  const recs = await dbRawMetas();
+  return Promise.all(recs.filter(r => r.e).map(r => openJSON(r.e, masterKey)));
+}
+
+// Archivos guardados por la versión 1.0 (sin código): se cifran la primera vez que se abre el baúl.
+async function encryptLegacy() {
+  const legacy = (await dbRawMetas()).filter(r => !r.e);
+  for (const meta of legacy) {
+    const blob = await dbBlob(meta.id);
+    if (!blob) { await dbDelete([meta.id]); continue; }
+    const thumb = await dbThumb(meta.id);
+    const sealed = await encryptBlob(blob, masterKey);
+    meta.storedSize = sealed.size;
+    await dbPut(await sealMeta(meta), sealed, thumb && await encryptBlob(thumb, masterKey));
+  }
+}
 
 function requestPersist() {
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
@@ -273,18 +390,18 @@ async function addOne(file, { keepOriginal = false, added, originalSize } = {}) 
     const gz = await gzip(content);
     if (gz.size < content.size * 0.97) { stored = gz; meta.enc = 'gzip'; }
   }
-  // Copia propia de los datos: el archivo del selector de iOS es temporal.
-  if (stored === file) stored = new Blob([await file.arrayBuffer()], { type: meta.type });
-  meta.storedSize = stored.size;
-
-  await dbPut(meta, stored, thumb);
+  // Al cifrar se crea una copia propia: el archivo del selector de iOS es temporal.
+  const sealed = await encryptBlob(stored, masterKey);
+  meta.storedSize = sealed.size;
+  await dbPut(await sealMeta(meta), sealed, thumb && await encryptBlob(thumb, masterKey));
   return meta;
 }
 
 // Recupera el archivo listo para ver o compartir (descomprimido).
 async function getContent(meta) {
-  let blob = await dbBlob(meta.id);
-  if (!blob) throw new Error('No se encontró el archivo');
+  const raw = await dbBlob(meta.id);
+  if (!raw) throw new Error('No se encontró el archivo');
+  let blob = await decryptBlob(raw, masterKey);
   if (meta.enc === 'gzip') blob = await gunzip(blob);
   return new File([blob], meta.name, { type: meta.type, lastModified: meta.added });
 }
@@ -437,7 +554,7 @@ function visibleItems() {
 }
 
 async function refresh() {
-  state.items = (await dbAllMeta()).sort((a, b) => b.added - a.added);
+  state.items = (await loadMetas()).sort((a, b) => b.added - a.added);
   const ids = new Set(state.items.map(m => m.id));
   for (const [id, url] of thumbUrls) {
     if (!ids.has(id)) { URL.revokeObjectURL(url); thumbUrls.delete(id); }
@@ -458,9 +575,11 @@ async function loadThumb(tile) {
   const id = tile.dataset.id;
   let url = thumbUrls.get(id);
   if (!url) {
-    const blob = await dbThumb(id);
-    if (!blob) return;
-    url = URL.createObjectURL(blob);
+    const raw = await dbThumb(id);
+    if (!raw || !masterKey) return;
+    try {
+      url = URL.createObjectURL(await decryptBlob(raw, masterKey, 'image/jpeg'));
+    } catch { return; /* el baúl se bloqueó mientras tanto */ }
     thumbUrls.set(id, url);
   }
   const img = tile.querySelector('img');
@@ -593,6 +712,7 @@ function showProgress(title, sub, fraction) {
 const hideProgress = () => { $('#progress').hidden = true; };
 
 // Diálogo genérico. `onOk` se ejecuta dentro del toque del usuario (necesario para compartir en iOS).
+let askCancel = null;
 function ask({ title, message = '', input = null, ok = 'Aceptar', cancel = 'Cancelar', danger = false, extra = null, onOk = null }) {
   return new Promise(resolve => {
     const d = $('#dialog');
@@ -609,12 +729,14 @@ function ask({ title, message = '', input = null, ok = 'Aceptar', cancel = 'Canc
     cancelBtn.hidden = !cancel;
     cancelBtn.textContent = cancel || '';
     const close = value => {
+      askCancel = null;
       okBtn.onclick = cancelBtn.onclick = inp.onkeydown = d.oncancel = null;
       d.close();
       resolve(value);
     };
     okBtn.onclick = () => { onOk?.(); close(input !== null ? inp.value.trim() : true); };
     cancelBtn.onclick = () => close(input !== null ? null : false);
+    askCancel = cancelBtn.onclick;
     inp.onkeydown = e => { if (e.key === 'Enter') okBtn.click(); };
     d.oncancel = e => { e.preventDefault(); close(input !== null ? null : false); };
     d.showModal();
@@ -706,8 +828,20 @@ async function addFiles(fileList, opts) {
   }
 }
 
-$('#addBtn').addEventListener('click', () => { if (!busy) $('#fileInput').click(); });
+// Mientras el selector de archivos de iOS está abierto no se bloquea el baúl.
+let pickingSince = 0;
+const isPicking = () => Date.now() - pickingSince < 5 * 60_000;
+function openPicker(input) {
+  pickingSince = Date.now();
+  input.click();
+}
+for (const input of [$('#fileInput'), $('#restoreInput')]) {
+  input.addEventListener('cancel', () => { pickingSince = 0; });
+}
+
+$('#addBtn').addEventListener('click', () => { if (!busy) openPicker($('#fileInput')); });
 $('#fileInput').addEventListener('change', e => {
+  pickingSince = 0;
   const files = e.target.files;
   addFiles(files).finally(() => { e.target.value = ''; });
 });
@@ -722,13 +856,18 @@ function setSelecting(on) {
 $('#selectBtn').addEventListener('click', () => setSelecting(!state.selecting));
 
 async function prepareFiles(metas, label) {
-  const files = [];
-  for (let i = 0; i < metas.length; i++) {
-    showProgress(label, metas[i].name, i / metas.length);
-    files.push(await getContent(metas[i]));
+  busy = true;
+  try {
+    const files = [];
+    for (let i = 0; i < metas.length; i++) {
+      showProgress(label, metas[i].name, i / metas.length);
+      files.push(await getContent(metas[i]));
+    }
+    return files;
+  } finally {
+    busy = false;
+    hideProgress();
   }
-  hideProgress();
-  return files;
 }
 
 $('#selShare').addEventListener('click', async () => {
@@ -781,14 +920,14 @@ function openViewer(list, index) {
   view.list = list;
   viewer.hidden = false;
   viewer.classList.remove('bare');
-  document.documentElement.classList.add('lock');
+  document.documentElement.classList.add('noscroll');
   showItem(index);
 }
 
 function closeViewer() {
   view.token++;
   viewer.hidden = true;
-  document.documentElement.classList.remove('lock');
+  document.documentElement.classList.remove('noscroll');
   stage.replaceChildren();
   zoom.el = null;
   if (view.url) URL.revokeObjectURL(view.url);
@@ -894,7 +1033,7 @@ $('#vRename').addEventListener('click', async () => {
   const ext = extOf(meta.name);
   if (ext && !extOf(name)) name += `.${ext}`;
   meta.name = name;
-  await dbPutMeta(meta);
+  await dbPutMeta(await sealMeta(meta));
   $('#vName').textContent = name;
   if (view.file) view.file = new File([view.file], name, { type: view.file.type, lastModified: view.file.lastModified });
   await refresh();
@@ -1060,7 +1199,7 @@ stage.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY));
 document.addEventListener('gesturestart', e => e.preventDefault());
 
 document.addEventListener('keydown', e => {
-  if (viewer.hidden || document.querySelector('dialog[open]')) return;
+  if (viewer.hidden || !$('#lock').hidden || document.querySelector('dialog[open]')) return;
   if (e.key === 'Escape') closeViewer();
   if (e.key === 'ArrowRight') step(1);
   if (e.key === 'ArrowLeft') step(-1);
@@ -1091,8 +1230,16 @@ async function renderStorage() {
   } catch { $('#stPersist').textContent = '—'; }
 }
 
+function renderAutoLock() {
+  const current = prefs.get('baul.autolock', '60');
+  for (const b of document.querySelectorAll('#autoLockGroup .row')) {
+    b.setAttribute('aria-checked', String(b.dataset.lock === current));
+  }
+}
+
 $('#settingsBtn').addEventListener('click', () => {
   renderQuality();
+  renderAutoLock();
   renderStorage();
   $('#version').textContent = `Baúl ${APP_VERSION} · ${canGzip ? 'compresión activa' : 'tu iOS no permite comprimir: actualiza a iOS 16.4 o superior'}`;
   settings.showModal();
@@ -1110,90 +1257,176 @@ for (const b of document.querySelectorAll('#qualityGroup .row')) {
     renderQuality();
   });
 }
+for (const b of document.querySelectorAll('#autoLockGroup .row')) {
+  b.addEventListener('click', () => {
+    prefs.set('baul.autolock', b.dataset.lock);
+    renderAutoLock();
+  });
+}
 
+const toB64 = bytes => btoa(String.fromCharCode(...bytes));
+const fromB64 = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+const sameBytes = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+const BACKUP_README = `Copia de seguridad cifrada del Baúl.
+
+Para recuperarla: abre el Baúl → Ajustes → «Restaurar desde una copia» y elige este .zip.
+Te pedirá el código que tenía el Baúl cuando hiciste la copia.
+Sin ese código los archivos no se pueden abrir.
+`;
+
+// La copia guarda los archivos tal como están en el baúl (comprimidos y cifrados) junto a la llave
+// protegida con el código: ocupa poco y nadie puede abrirla sin el código.
 $('#backupBtn').addEventListener('click', async () => {
   if (!state.items.length) { toast('El baúl está vacío'); return; }
   settings.close();
+  busy = true;
   try {
-    const used = new Set();
-    const entries = [];
-    const manifest = { app: 'baul', version: 1, created: Date.now(), files: {} };
+    const cfg = await dbGetConfig();
+    const entries = [{ name: 'LEEME.txt', blob: new Blob([BACKUP_README]), date: new Date() }];
+    const index = [];
     for (let i = 0; i < state.items.length; i++) {
       const m = state.items[i];
-      showProgress('Preparando copia…', m.name, (i / state.items.length) * 0.5);
-      const file = await getContent(m);
-      let path = m.name.replace(/[\\/:*?"<>|]/g, '_');
-      const base = path.replace(/(\.[^.]+)?$/, '');
-      const ext = path.slice(base.length);
-      for (let n = 2; used.has(path.toLowerCase()); n++) path = `${base} (${n})${ext}`;
-      used.add(path.toLowerCase());
-      entries.push({ name: path, blob: file, date: new Date(m.added) });
-      manifest.files[path] = { name: m.name, type: m.type, added: m.added, size: m.size };
+      showProgress('Preparando copia…', m.name, (i / state.items.length) * 0.2);
+      const data = await dbBlob(m.id);
+      if (!data) continue;
+      const thumb = await dbThumb(m.id);
+      const item = { ...m, data: `datos/${i}` };
+      entries.push({ name: item.data, blob: data, date: new Date(m.added) });
+      if (thumb) {
+        item.thumb = `datos/${i}.min`;
+        entries.push({ name: item.thumb, blob: thumb, date: new Date(m.added) });
+      }
+      index.push(item);
     }
-    entries.push({ name: 'baul.json', blob: new Blob([JSON.stringify(manifest)]), date: new Date() });
-    const zip = await buildZip(entries, (i, n, name) => showProgress('Creando copia…', name, 0.5 + (i / n) * 0.5));
+    const header = {
+      app: 'baul', version: 2, created: Date.now(),
+      salt: toB64(cfg.salt), iterations: cfg.iterations, wrapped: toB64(cfg.wrapped),
+    };
+    entries.push({ name: 'baul.json', blob: new Blob([JSON.stringify(header)]), date: new Date() });
+    entries.push({ name: 'indice.bin', blob: new Blob([await sealJSON(index, masterKey)]), date: new Date() });
+    const zip = await buildZip(entries, (i, n) => showProgress('Creando copia…', `${Math.round((i / n) * 100)} %`, 0.2 + (i / n) * 0.8));
     hideProgress();
     const d = new Date();
     const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const file = new File([zip], `Baul-copia-${stamp}.zip`, { type: 'application/zip' });
-    await offerShare([file], 'Copia lista', `${fmtBytes(file.size)} · elige «Guardar en Archivos» (por ejemplo en iCloud Drive).`);
+    await offerShare([file], 'Copia lista',
+      `${fmtBytes(file.size)} · va cifrada con tu código. Elige «Guardar en Archivos» (por ejemplo en iCloud Drive).`);
   } catch (err) {
     hideProgress();
     ask({ title: 'No se pudo crear la copia', message: String(err.message || err), cancel: null });
+  } finally {
+    busy = false;
   }
 });
 
-$('#restoreBtn').addEventListener('click', () => { settings.close(); $('#restoreInput').click(); });
+async function restoreEncrypted(header, byName, report) {
+  const cfg = await dbGetConfig();
+  const backupCfg = { salt: fromB64(header.salt), iterations: header.iterations, wrapped: fromB64(header.wrapped) };
+  // Copia de este mismo baúl y con el código actual: no hace falta pedirlo.
+  let key = sameBytes(backupCfg.wrapped, cfg.wrapped) ? masterKey : null;
+  let error = '';
+  while (!key) {
+    hideProgress();
+    const pin = await pinPad.ask({
+      title: 'Código de la copia', sub: 'Escribe el código que tenía el Baúl cuando hiciste esta copia.', error, cancel: true,
+    });
+    if (pin === null) { pinPad.close(); report.cancelled = true; return; }
+    pinPad.wait('Comprobando…');
+    const raw = await unwrapMaster(backupCfg, pin);
+    if (raw) { key = await importMaster(raw); raw.fill(0); }
+    error = 'Código incorrecto';
+  }
+  pinPad.close();
+  const indexEntry = byName.get('indice.bin');
+  if (!indexEntry) throw new Error('La copia está incompleta.');
+  const index = await openJSON(new Uint8Array(await (await indexEntry.blob()).arrayBuffer()), key);
+  const existing = new Set(state.items.map(m => `${m.name}|${m.added}`));
+  for (let i = 0; i < index.length; i++) {
+    const item = index[i];
+    showProgress(`Restaurando ${i + 1} de ${index.length}`, item.name, i / index.length);
+    await nextFrame();
+    if (existing.has(`${item.name}|${item.added}`)) { report.skipped++; continue; }
+    try {
+      let data = await byName.get(item.data).blob();
+      let thumb = item.thumb && byName.has(item.thumb) ? await byName.get(item.thumb).blob() : null;
+      if (key === masterKey) {
+        // Copia propia de los datos: el .zip elegido es un archivo temporal de iOS.
+        data = new Blob([await data.arrayBuffer()]);
+        if (thumb) thumb = new Blob([await thumb.arrayBuffer()]);
+      } else {
+        data = await encryptBlob(await decryptBlob(data, key), masterKey);
+        if (thumb) thumb = await encryptBlob(await decryptBlob(thumb, key), masterKey);
+      }
+      const meta = { ...item, id: uid(), storedSize: data.size };
+      delete meta.data;
+      delete meta.thumb;
+      await dbPut(await sealMeta(meta), data, thumb);
+      report.added++;
+    } catch (err) {
+      console.error(err);
+      report.failed.push(item.name);
+    }
+  }
+}
+
+// .zip normales (o copias de la versión 1.0, sin cifrar): se añade cada archivo como nuevo.
+async function restorePlain(entries, manifest, report) {
+  const files = entries.filter(x => !x.name.endsWith('/') && x.name !== 'baul.json'
+    && !x.name.startsWith('__MACOSX/') && !/(^|\/)\.DS_Store$/.test(x.name));
+  const existing = new Set(state.items.map(m => `${m.name}|${m.added}`));
+  for (let i = 0; i < files.length; i++) {
+    const entry = files[i];
+    const info = manifest?.files?.[entry.name];
+    const name = info?.name || entry.name.split('/').pop();
+    showProgress(`Restaurando ${i + 1} de ${files.length}`, name, i / files.length);
+    await nextFrame();
+    if (info && existing.has(`${name}|${info.added}`)) { report.skipped++; continue; }
+    if (entry.encrypted) { report.failed.push(`${name} (protegido con contraseña)`); continue; }
+    try {
+      const blob = await entry.blob();
+      const file = new File([blob], name, { type: info?.type || '' });
+      // Lo que viene de una copia del Baúl ya está optimizado: no volver a recomprimir fotos.
+      await addOne(file, { keepOriginal: !!manifest, added: info?.added, originalSize: info?.size });
+      report.added++;
+    } catch (err) {
+      console.error(err);
+      report.failed.push(name);
+    }
+  }
+}
+
+$('#restoreBtn').addEventListener('click', () => { settings.close(); openPicker($('#restoreInput')); });
 $('#restoreInput').addEventListener('change', async e => {
+  pickingSince = 0;
   const zipFile = e.target.files[0];
   e.target.value = '';
   if (!zipFile) return;
   busy = true;
-  let added = 0;
-  let skipped = 0;
-  const failed = [];
+  requestPersist();
+  const report = { added: 0, skipped: 0, failed: [], cancelled: false };
   try {
     const entries = await readZip(zipFile);
-    const manifestEntry = entries.find(x => x.name === 'baul.json');
-    let manifest = null;
-    if (manifestEntry) {
-      try { manifest = JSON.parse(await (await manifestEntry.blob()).text()); } catch { manifest = null; }
+    const byName = new Map(entries.map(x => [x.name, x]));
+    let header = null;
+    if (byName.has('baul.json')) {
+      try { header = JSON.parse(await (await byName.get('baul.json').blob()).text()); } catch { header = null; }
     }
-    const files = entries.filter(x => !x.name.endsWith('/') && x.name !== 'baul.json'
-      && !x.name.startsWith('__MACOSX/') && !/(^|\/)\.DS_Store$/.test(x.name));
-    const existing = new Set(state.items.map(m => `${m.name}|${m.added}`));
-    requestPersist();
-    for (let i = 0; i < files.length; i++) {
-      const entry = files[i];
-      const info = manifest?.files?.[entry.name];
-      const name = info?.name || entry.name.split('/').pop();
-      showProgress(`Restaurando ${i + 1} de ${files.length}`, name, i / files.length);
-      await nextFrame();
-      if (info && existing.has(`${name}|${info.added}`)) { skipped++; continue; }
-      if (entry.encrypted) { failed.push(`${name} (protegido con contraseña)`); continue; }
-      try {
-        const blob = await entry.blob();
-        const file = new File([blob], name, { type: info?.type || '' });
-        // Lo que viene de una copia del Baúl ya está optimizado: no volver a recomprimir fotos.
-        await addOne(file, { keepOriginal: !!manifest, added: info?.added, originalSize: info?.size });
-        added++;
-      } catch (err) {
-        console.error(err);
-        failed.push(name);
-      }
-    }
+    if (header?.version === 2) await restoreEncrypted(header, byName, report);
+    else await restorePlain(entries, header, report);
   } catch (err) {
-    failed.push(String(err.message || err));
+    report.failed.push(String(err.message || err));
   } finally {
     busy = false;
     hideProgress();
   }
   await refresh();
-  const parts = [`${added} ${added === 1 ? 'archivo restaurado' : 'archivos restaurados'}`];
-  if (skipped) parts.push(`${skipped} ya estaban en el baúl`);
+  if (report.cancelled) return;
+  const parts = [`${report.added} ${report.added === 1 ? 'archivo restaurado' : 'archivos restaurados'}`];
+  if (report.skipped) parts.push(`${report.skipped} ya estaban en el baúl`);
   await ask({
     title: 'Restauración terminada',
-    message: parts.join('\n') + (failed.length ? `\n\nNo se pudieron restaurar:\n${failed.join('\n')}` : ''),
+    message: parts.join('\n') + (report.failed.length ? `\n\nNo se pudieron restaurar:\n${report.failed.join('\n')}` : ''),
     cancel: null,
   });
 });
@@ -1209,6 +1442,245 @@ $('#wipeBtn').addEventListener('click', async () => {
   settings.close();
   await refresh();
   toast('Baúl vacío');
+});
+
+/* ================= Código de acceso ================= */
+
+const lockEl = $('#lock');
+const keypad = $('#keypad');
+
+const pinPad = {
+  value: '',
+  resolve: null,
+  // Pide un código de 6 cifras. Devuelve null si se cancela.
+  ask({ title, sub = '', error = '', cancel = false, forgot = false }) {
+    lockEl.hidden = false;
+    this.value = '';
+    this.renderDots();
+    $('#lockTitle').textContent = title;
+    this.message(error || sub, !!error);
+    $('#lockCancel').style.visibility = cancel ? 'visible' : 'hidden';
+    $('#lockForgot').hidden = !forgot;
+    keypad.classList.remove('wait');
+    if (error) {
+      const dots = $('#dots');
+      dots.classList.remove('shake');
+      void dots.offsetWidth;
+      dots.classList.add('shake');
+      navigator.vibrate?.(180);
+    }
+    return new Promise(resolve => { this.resolve = resolve; });
+  },
+  message(text, isError = false) {
+    const p = $('#lockSub');
+    p.textContent = text;
+    p.classList.toggle('err', isError);
+  },
+  wait(text) {
+    keypad.classList.add('wait');
+    if (text) this.message(text);
+  },
+  ready(text = '') {
+    keypad.classList.remove('wait');
+    this.message(text);
+  },
+  close() {
+    this.resolve = null;
+    lockEl.hidden = true;
+  },
+  cancel() {
+    const r = this.resolve;
+    this.resolve = null;
+    r?.(null);
+  },
+  renderDots() {
+    [...$('#dots').children].forEach((d, i) => d.classList.toggle('on', i < this.value.length));
+  },
+  press(k) {
+    if (!this.resolve || keypad.classList.contains('wait')) return;
+    if (k === 'del') this.value = this.value.slice(0, -1);
+    else if (this.value.length < PIN_LENGTH) this.value += k;
+    this.renderDots();
+    if (this.value.length === PIN_LENGTH) {
+      const v = this.value;
+      const r = this.resolve;
+      this.resolve = null;
+      setTimeout(() => r(v), 120);
+    }
+  },
+};
+
+keypad.addEventListener('click', e => {
+  const b = e.target.closest('button[data-k]');
+  if (b) pinPad.press(b.dataset.k);
+});
+$('#lockCancel').addEventListener('click', () => pinPad.cancel());
+document.addEventListener('keydown', e => {
+  if (lockEl.hidden || document.querySelector('dialog[open]')) return;
+  if (/^\d$/.test(e.key)) pinPad.press(e.key);
+  else if (e.key === 'Backspace') pinPad.press('del');
+  else if (e.key === 'Escape' && $('#lockCancel').style.visibility === 'visible') pinPad.cancel();
+});
+
+function isWeakPin(pin) {
+  return /^(\d)\1+$/.test(pin) || '01234567890'.includes(pin) || '09876543210'.includes(pin);
+}
+
+// Tras 5 fallos seguidos hay que esperar, cada vez más (máx. 15 min).
+const MAX_TRIES = 5;
+const lockoutLeft = () => Math.max(0, Number(prefs.get('baul.lockUntil', '0')) - Date.now());
+function registerFailure() {
+  const fails = Number(prefs.get('baul.fails', '0')) + 1;
+  prefs.set('baul.fails', String(fails));
+  if (fails >= MAX_TRIES) {
+    prefs.set('baul.lockUntil', String(Date.now() + Math.min(15 * 60_000, 30_000 * 2 ** (fails - MAX_TRIES))));
+  }
+  return fails;
+}
+function resetFailures() {
+  prefs.set('baul.fails', '0');
+  prefs.set('baul.lockUntil', '0');
+}
+
+async function setupFlow() {
+  $('#lockHint').hidden = isStandalone;
+  try {
+    await createPinFlow();
+  } finally {
+    $('#lockHint').hidden = true;
+  }
+}
+
+async function createPinFlow() {
+  let error = '';
+  for (;;) {
+    const a = await pinPad.ask({
+      title: 'Crea tu código', sub: 'Elige 6 números. Te lo pediré cada vez que abras el Baúl.', error,
+    });
+    if (isWeakPin(a)) { error = 'Ese código es muy fácil de adivinar. Elige otro.'; continue; }
+    const b = await pinPad.ask({ title: 'Repite el código', sub: 'Apúntalo en un sitio seguro: si lo olvidas, no se pueden recuperar tus archivos.' });
+    if (a === b) {
+      pinPad.wait('Preparando tu baúl…');
+      await createVault(a);
+      resetFailures();
+      return;
+    }
+    error = 'Los códigos no coinciden. Vuelve a empezar.';
+  }
+}
+
+// Devuelve false si se borró el baúl con «¿Olvidaste el código?».
+async function unlockFlow() {
+  let error = '';
+  for (;;) {
+    const pending = pinPad.ask({ title: 'Introduce tu código', error, forgot: true });
+    while (lockoutLeft() > 0) {
+      pinPad.wait(`Demasiados intentos. Espera ${fmtDur(lockoutLeft() / 1000)}`);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (keypad.classList.contains('wait')) pinPad.ready();
+    const pin = await pending;
+    if (pin === null) return false;
+    pinPad.wait('Abriendo…');
+    if (await unlockVault(pin)) { resetFailures(); return true; }
+    const fails = registerFailure();
+    error = fails < MAX_TRIES ? `Código incorrecto · ${MAX_TRIES - fails} ${MAX_TRIES - fails === 1 ? 'intento' : 'intentos'} más antes de esperar` : 'Código incorrecto';
+  }
+}
+
+// Muestra la pantalla del código hasta que el baúl queda abierto.
+async function gate() {
+  for (;;) {
+    if (!(await dbGetConfig())) { await setupFlow(); break; }
+    if (await unlockFlow()) break;
+  }
+  pinPad.wait('Abriendo…');
+  await encryptLegacy();
+  await refresh();
+  pinPad.close();
+}
+
+$('#lockForgot').addEventListener('click', async () => {
+  const yes = await ask({
+    title: '¿Olvidaste el código?',
+    message: 'Tus archivos están cifrados con él: sin el código no hay forma de abrirlos.\n\nPuedes borrar el baúl y empezar de cero con un código nuevo. Si tienes una copia de seguridad, podrás restaurarla con el código que tenías al hacerla.',
+    ok: 'Borrar el baúl', danger: true,
+  });
+  if (!yes) return;
+  const sure = await ask({
+    title: '¿Seguro?', message: 'Se borrarán todos los archivos del baúl. No se puede deshacer.', ok: 'Sí, borrar todo', danger: true,
+  });
+  if (!sure) return;
+  await dbWipeAll();
+  resetFailures();
+  pinPad.cancel();
+});
+
+function lockNow() {
+  if (!masterKey) return;
+  if (busy) { toast('Espera a que termine'); return; }
+  masterKey = null;
+  lockEl.hidden = false;
+  pinPad.wait();
+  closeViewer();
+  askCancel?.();
+  if (settings.open) settings.close();
+  state.items = [];
+  state.selecting = false;
+  state.selected.clear();
+  for (const url of thumbUrls.values()) URL.revokeObjectURL(url);
+  thumbUrls.clear();
+  render();
+  gate().catch(fatal);
+}
+$('#lockBtn').addEventListener('click', lockNow);
+
+$('#changePinBtn').addEventListener('click', async () => {
+  settings.close();
+  const cfg = await dbGetConfig();
+  let raw = null;
+  let error = '';
+  while (!raw) {
+    const old = await pinPad.ask({ title: 'Código actual', error, cancel: true });
+    if (old === null) { pinPad.close(); return; }
+    pinPad.wait('Comprobando…');
+    raw = await unwrapMaster(cfg, old);
+    error = 'Código incorrecto';
+  }
+  error = '';
+  try {
+    for (;;) {
+      const a = await pinPad.ask({ title: 'Nuevo código', sub: 'Elige 6 números.', error, cancel: true });
+      if (a === null) break;
+      if (isWeakPin(a)) { error = 'Ese código es muy fácil de adivinar. Elige otro.'; continue; }
+      const b = await pinPad.ask({ title: 'Repite el nuevo código', cancel: true });
+      if (b === null) break;
+      if (a !== b) { error = 'Los códigos no coinciden. Vuelve a empezar.'; continue; }
+      pinPad.wait('Guardando…');
+      await dbSetConfig({ ...cfg, ...(await wrapMaster(raw, a)) });
+      toast('Código cambiado');
+      break;
+    }
+  } finally {
+    raw.fill(0);
+    pinPad.close();
+  }
+});
+
+// Bloqueo automático al salir de la app, y tapa el contenido en el selector de apps de iOS.
+let hiddenAt = 0;
+const autoLockSeconds = () => Number(prefs.get('baul.autolock', '60'));
+document.addEventListener('visibilitychange', () => {
+  const unlockedView = masterKey && lockEl.hidden;
+  if (document.hidden) {
+    hiddenAt = Date.now();
+    if (!unlockedView || isPicking()) return;
+    if (autoLockSeconds() === 0 && !busy) lockNow();
+    else $('#cover').hidden = false;
+  } else {
+    $('#cover').hidden = true;
+    if (unlockedView && !isPicking() && Date.now() - hiddenAt >= autoLockSeconds() * 1000) lockNow();
+  }
 });
 
 /* ================= Instalación y modo sin conexión ================= */
@@ -1230,7 +1702,13 @@ if ('serviceWorker' in navigator) {
 }
 if (isStandalone) requestPersist();
 
-refresh().catch(err => {
+function fatal(err) {
   console.error(err);
   ask({ title: 'No se pudo abrir el baúl', message: String(err.message || err), cancel: null });
-});
+}
+
+if (!window.crypto?.subtle) {
+  pinPad.wait('Abre el Baúl desde su dirección https:// para poder usar el código.');
+} else {
+  gate().catch(fatal);
+}
