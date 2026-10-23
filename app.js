@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.5.0';
 
 /* ================= Utilidades ================= */
 
@@ -1539,6 +1539,7 @@ async function deleteEntries(fileIds, folderIds) {
   while (current && folders.has(current)) current = parentId(folderById(current));
   await dbDelete([...files]);
   await dbDeleteFolders([...folders]);
+  clearWebAppData([...files]);
   state.items = state.items.filter(m => !files.has(m.id));
   state.folders = state.folders.filter(f => !folders.has(f.id));
   for (const id of files) {
@@ -1776,10 +1777,23 @@ function otherView(meta, file) {
       }
     });
   }
-  const foreign = DOS_EXTS.has(ext) ? null : FOREIGN_APPS[ext];
+  if (ANDROID_EXTS.has(ext)) {
+    // Hay que mirar dentro del .apk: si es una app web (HTML5) se abre aquí mismo.
+    const slot = el('div');
+    box.append(slot);
+    inspectWebApp(meta, file).catch(() => ({})).then(info => {
+      if (info.page) {
+        const run = el('button', 'play', 'Ejecutar');
+        run.onclick = () => openWebApp(meta, file, info);
+        slot.replaceWith(run, el('div', 's', 'App web (HTML5) · se abre aquí mismo'));
+      } else {
+        slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
+      }
+    });
+  }
+  const foreign = DOS_EXTS.has(ext) || ANDROID_EXTS.has(ext) ? null : FOREIGN_APPS[ext];
   if (foreign) box.append(el('p', 'why', foreign));
-  if (ANDROID_EXTS.has(ext)) box.append(waysButton('android'));
-  else if (ext === 'msi') box.append(waysButton('windows'));
+  if (ext === 'msi') box.append(waysButton('windows'));
   const open = el('button', 'open', 'Abrir en otra app');
   open.onclick = () => shareFiles([file]);
   box.append(open);
@@ -1793,10 +1807,14 @@ let emuSession = null;
 
 async function chooseSystemAndPlay(meta, file) {
   const options = Object.entries(GAME_SYSTEMS).map(([key, s]) => ({ label: s.name, value: key }));
-  if (extOf(meta.name) === 'zip') options.push({ label: 'PC antiguo (MS-DOS)', sub: 'Juegos y programas de antes de Windows 95', value: 'dos' });
+  if (extOf(meta.name) === 'zip') {
+    options.push({ label: 'PC antiguo (MS-DOS)', sub: 'Juegos y programas de antes de Windows 95', value: 'dos' });
+    options.push({ label: 'Juego web (HTML5)', sub: 'Un .zip con un index.html dentro', value: 'web' });
+  }
   const system = await menu('¿De qué sistema es el juego?', options,
     'Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.');
   if (system === 'dos') openDos(meta, file);
+  else if (system === 'web') openWebApp(meta, file);
   else if (system) openGame(meta, system, file);
 }
 
@@ -1808,18 +1826,20 @@ function openGame(meta, system, file) {
 
 // Abre un emulador (página aislada) a pantalla completa y le pasa el juego cuando está listo.
 // `saveId`: las partidas de MS-DOS se guardan cifradas en el baúl, con la llave de esta sesión.
-function openPlayer(meta, page, start, saveId = null) {
+// `web`: una app web (HTML5) servida desde la copia temporal; no puede salir del visor ni abrir ventanas.
+function openPlayer(meta, page, start, { saveId = null, web = false } = {}) {
   closeGame(false);
   const frame = el('iframe');
   frame.title = meta.name;
   frame.allow = 'autoplay; gamepad; fullscreen';
+  if (web) frame.sandbox = 'allow-scripts allow-same-origin allow-forms allow-modals allow-pointer-lock';
   frame.src = page;
   const onMessage = e => {
     if (e.source !== frame.contentWindow || e.origin !== location.origin) return;
-    if (e.data?.type === 'ready') frame.contentWindow.postMessage(start, location.origin);
+    if (e.data?.type === 'ready' && start) frame.contentWindow.postMessage(start, location.origin);
   };
   window.addEventListener('message', onMessage);
-  emuSession = { frame, onMessage, saveId, key: masterKey };
+  emuSession = { frame, onMessage, saveId, web, key: masterKey };
   $('#emuTitle').textContent = meta.name;
   $('#emuHost').replaceChildren(frame);
   emu.hidden = false;
@@ -1831,7 +1851,7 @@ async function closeGame(save = true) {
   const session = emuSession;
   if (!session) return;
   emuSession = null;
-  if (save && session.frame.contentWindow) {
+  if (save && !session.web && session.frame.contentWindow) {
     const changes = await new Promise(resolve => {
       const done = e => { if (e.source === session.frame.contentWindow && e.data?.type === 'saved') finish(e.data.changes); };
       const finish = value => { window.removeEventListener('message', done); clearTimeout(timer); resolve(value); };
@@ -1845,16 +1865,21 @@ async function closeGame(save = true) {
   }
   window.removeEventListener('message', session.onMessage);
   $('#emuHost').replaceChildren();
+  // La copia descifrada de la app web no se queda en el iPhone.
+  if (session.web) clearRunCache();
   emu.hidden = true;
   if (viewer.hidden) document.documentElement.classList.remove('noscroll');
 }
 $('#emuClose').addEventListener('click', () => closeGame());
 
 // Partidas guardadas por el emulador (van aparte, sin nombres de juegos): se borran al vaciar el baúl.
-const clearGameSaves = () => new Promise(resolve => {
-  const r = indexedDB.deleteDatabase('EmulatorJS-states');
-  r.onsuccess = r.onerror = r.onblocked = () => resolve();
-});
+const clearGameSaves = () => Promise.all([
+  new Promise(resolve => {
+    const r = indexedDB.deleteDatabase('EmulatorJS-states');
+    r.onsuccess = r.onerror = r.onblocked = () => resolve();
+  }),
+  clearWebAppData(null),
+]);
 
 /* ---- MS-DOS: programas y juegos de PC antiguos, con js-dos (DOSBox) ---- */
 
@@ -1988,7 +2013,7 @@ async function openDos(meta, file) {
     ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
     return;
   }
-  if (!locked) openPlayer(meta, 'dos.html', { type: 'start', ...start }, meta.id);
+  if (!locked) openPlayer(meta, 'dos.html', { type: 'start', ...start }, { saveId: meta.id });
 }
 
 // Lo que el programa escribe en su disco (partidas, configuración…) se guarda cifrado junto a él.
@@ -2021,6 +2046,122 @@ async function storeDosChanges(id, changes, key) {
   });
 }
 
+/* ---- Apps y juegos web (HTML5): los .apk que llevan una web dentro, o un .zip con un index.html ---- */
+
+// Con qué está hecho un .apk que no es web (y por tanto necesita Android de verdad).
+const APK_ENGINES = [
+  [/(^|\/)assets\/bin\/Data\/|\/libunity\.so$/, 'Unity'],
+  [/\/lib(UE4|Unreal)\.so$/i, 'Unreal Engine'],
+  [/\/libgodot_android\.so$|(^|\/)assets\/[^/]+\.pck$/, 'Godot'],
+  [/\/liblove\.so$/, 'LÖVE'],
+  [/\/libcocos/, 'Cocos'],
+  [/\/libgdx\.so$/, 'libGDX'],
+  [/\/libyoyo\.so$/, 'GameMaker'],
+  [/\/libflutter\.so$/, 'Flutter'],
+  [/\/libreactnativejni\.so$|(^|\/)assets\/index\.android\.bundle$/, 'React Native'],
+  [/\/libmonodroid\.so$/, 'Xamarin'],
+  [/(^|\/)META-INF\/AIR\//, 'Adobe AIR'],
+];
+function nativeApkReason(engine) {
+  const what = engine ? `Está hecha con ${engine}` : 'Es una app nativa de Android';
+  return `${what}: necesita Android de verdad, y Safari no deja ejecutar ese código en el iPhone. ` +
+    'El Baúl abre por dentro las apps y juegos de Android hechos con tecnología web (HTML5), y este no lo es.';
+}
+
+// Busca la web que trae un .apk (también dentro de .xapk/.apks, que llevan varios .apk) o un .zip.
+async function inspectWebApp(meta, file) {
+  let entries = await readZip(file);
+  if (!entries.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name))) {
+    // Paquete con varios .apk dentro: el principal es el que trae la carpeta assets/.
+    for (const inner of entries.filter(e => /\.apk$/i.test(e.name))) {
+      const sub = await readZip(await inner.blob());
+      if (sub.some(e => /(^|\/)assets\//.test(e.name))) { entries = sub; break; }
+    }
+  }
+  const files = entries.filter(e => !e.name.endsWith('/') && !/(^|\/)__MACOSX\//.test(e.name));
+  const isApp = files.some(e => /(^|\/)AndroidManifest\.xml$/.test(e.name));
+  const engine = APK_ENGINES.find(([re]) => files.some(e => re.test(e.name)))?.[1];
+  if (isApp && engine) return { engine };
+  // La página principal más cercana a la raíz (en un .apk, dentro de assets/).
+  const pages = files.map(e => e.name)
+    .filter(n => /(^|\/)index\.html?$/i.test(n) && (!isApp || /(^|\/)assets\//.test(n)))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.length - b.length);
+  if (!pages.length) return { engine };
+  const root = pages[0].slice(0, pages[0].lastIndexOf('/') + 1);
+  return { root, page: pages[0].slice(root.length), files: files.filter(e => e.name.startsWith(root)) };
+}
+
+// La misma forma que usa el service worker para buscar el archivo (ver sw.js).
+function runUrl(href) {
+  const url = new URL(href);
+  const decode = part => { try { return decodeURIComponent(part); } catch { return part; } };
+  return url.origin + url.pathname.split('/').map(p => encodeURIComponent(decode(p))).join('/');
+}
+const RUN_CACHE = 'baul-run';
+const clearRunCache = () => (self.caches ? caches.delete(RUN_CACHE).catch(() => {}) : Promise.resolve());
+const WEB_MIME = { ...EXT_MIME, wasm: 'application/wasm', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mid: 'audio/midi', midi: 'audio/midi' };
+
+// Copia la web descifrada a una caché temporal (se borra al cerrar) y la abre en el visor.
+async function openWebApp(meta, file, info = null) {
+  if (busy) return;
+  if (!self.caches || !navigator.serviceWorker?.controller) {
+    ask({ title: 'No se puede abrir', message: 'Para abrir apps web, abre el Baúl desde su icono de la pantalla de inicio y vuelve a intentarlo.', cancel: null });
+    return;
+  }
+  busy = true;
+  try {
+    info ??= await inspectWebApp(meta, file);
+    if (!info.page) throw new Error(info.engine !== undefined || ANDROID_EXTS.has(extOf(meta.name))
+      ? nativeApkReason(info.engine) : 'No hay ningún index.html dentro del .zip.');
+    await clearRunCache();
+    const cache = await caches.open(RUN_CACHE);
+    const base = new URL(`run/${meta.id}/`, location.href);
+    const shim = `<script src="${new URL('apk-shim.js', location.href).href}"></script>`;
+    for (let i = 0; i < info.files.length; i++) {
+      if (locked) { await clearRunCache(); return; }
+      showProgress('Preparando la app…', meta.name, i / info.files.length);
+      const entry = info.files[i];
+      const path = entry.name.slice(info.root.length);
+      const ext = extOf(path);
+      let blob = await entry.blob();
+      let type = WEB_MIME[ext] || 'application/octet-stream';
+      if (ext === 'html' || ext === 'htm') {
+        // El ayudante va antes que cualquier script de la app.
+        const html = await blob.text();
+        const head = /<head[^>]*>/i.exec(html) || /<!doctype[^>]*>/i.exec(html);
+        const at = head ? head.index + head[0].length : 0;
+        type = 'text/html; charset=utf-8';
+        blob = new Blob([html.slice(0, at), shim, html.slice(at)]);
+      }
+      await cache.put(runUrl(new URL(path.replace(/[?#%]/g, encodeURIComponent), base).href), new Response(blob, { headers: { 'Content-Type': type } }));
+    }
+    hideProgress();
+    if (locked) await clearRunCache();
+    else openPlayer(meta, new URL(info.page, base).href, null, { web: true });
+  } catch (err) {
+    hideProgress();
+    await clearRunCache();
+    ask({ title: 'No se puede abrir', message: err.message || String(err), cancel: null });
+  } finally {
+    busy = false;
+    hideProgress();
+  }
+}
+
+// Partidas de las apps web: van en el almacenamiento de la app con el prefijo de su archivo (ver apk-shim.js).
+async function clearWebAppData(ids) {
+  const mine = name => name?.startsWith('apk:') && (!ids || ids.some(id => name.startsWith(`apk:${id}:`)));
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (mine(k)) localStorage.removeItem(k);
+    }
+  } catch { /* sin almacenamiento */ }
+  try {
+    for (const d of (await indexedDB.databases?.()) || []) if (mine(d.name)) indexedDB.deleteDatabase(d.name);
+  } catch { /* nada que borrar */ }
+}
+
 // Formas reales de usar en el iPhone programas de Windows y apps de Android (fuera del Baúl).
 const WAYS = {
   windows: {
@@ -2047,7 +2188,7 @@ const WAYS = {
   },
 };
 function waysButton(kind) {
-  const b = el('button', 'open', 'Cómo usarlo en el iPhone');
+  const b = el('button', 'open', 'Otras formas (fuera del Baúl)');
   b.onclick = () => menu(WAYS[kind].title, WAYS[kind].options, WAYS[kind].note);
   return b;
 }
@@ -2869,6 +3010,8 @@ if ('serviceWorker' in navigator) {
   });
 }
 if (isStandalone) requestPersist();
+// Si la app se cerró con una app web abierta, su copia temporal se borra ahora.
+clearRunCache();
 
 function fatal(err) {
   console.error(err);
