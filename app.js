@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.4.1';
 
 /* ================= Utilidades ================= */
 
@@ -335,8 +335,8 @@ const DOS_EXTS = new Set(['exe', 'com', 'bat', 'jsdos']);
 const PROGRAM_EXTS = new Set([...DOS_EXTS, 'msi', 'apk', 'xapk', 'apks']);
 
 // Programas de otros sistemas: se pueden guardar, y hay formas de usarlos desde el iPhone (ver «WAYS»).
-const WINDOWS_APP = 'Es un programa de Windows: el iPhone no puede ejecutarlo por sí solo, pero sí desde tu PC o desde la nube.';
-const ANDROID_APP = 'Es una app de Android: el iPhone no puede instalarla, pero sí usarla desde un Android en la nube o desde tu PC.';
+const WINDOWS_APP = 'Es un programa de Windows: no se abre aquí, pero sí con otras apps del iPhone, desde tu PC o desde la nube.';
+const ANDROID_APP = 'Es una app de Android: no se abre aquí, pero sí con otras apps del iPhone, desde la nube o desde tu PC.';
 const FOREIGN_APPS = {
   exe: WINDOWS_APP, msi: WINDOWS_APP,
   apk: ANDROID_APP, xapk: ANDROID_APP, apks: ANDROID_APP, aab: ANDROID_APP,
@@ -2025,8 +2025,9 @@ async function storeDosChanges(id, changes, key) {
 const WAYS = {
   windows: {
     title: 'Programas de Windows en el iPhone',
-    note: 'El iPhone no puede ejecutar un .exe de Windows por sí solo (los de MS-DOS sí se abren aquí mismo). Estas son las formas que existen:',
+    note: 'Los .exe de MS-DOS se abren aquí mismo. Para los de Windows, estas son las formas que existen:',
     options: [
+      { label: 'Madeira: juegos de Windows en el iPhone', sub: 'Ejecuta juegos .exe de verdad, sin jailbreak (iOS 26 o posterior). Se instala fuera de la App Store con SideStore y hay que activar JIT. Experimental. Copia la carpeta del juego en Madeira con «Abrir en otra app» → «Guardar en Archivos»', href: 'https://github.com/willfaust/Madeira' },
       { label: 'Desde tu PC con Windows', sub: 'Pásale el archivo con «Abrir en otra app» y maneja el PC desde el iPhone con Windows App (Microsoft, gratis)', href: 'https://apps.apple.com/app/id1295203466' },
       { label: 'Juegos de tu PC, en el iPhone', sub: 'Steam Link (gratis): juega por wifi a lo que tengas en el PC', href: 'https://apps.apple.com/app/id1246969117' },
       { label: 'Cualquier juego de tu PC', sub: 'Moonlight (gratis), con Sunshine instalado en el PC. Mejor con un mando', href: 'https://apps.apple.com/app/id1000551566' },
@@ -2036,8 +2037,10 @@ const WAYS = {
   },
   android: {
     title: 'Apps de Android en el iPhone',
-    note: 'iOS no puede instalar archivos .apk. Antes de nada, busca si la app o el juego está en la App Store. Si no, estas son las formas:',
+    note: 'Antes de nada, mira si la app o el juego está en la App Store. Si no, estas son las formas que existen:',
     options: [
+      { label: 'Husk: apps y juegos Android en el iPhone', sub: 'Ejecuta el .apk de verdad, sin jailbreak (iOS 16 o posterior). Se instala fuera de la App Store con SideStore o AltStore y hay que activar JIT. Va mejor con juegos de 64 bits. Pásale el .apk con «Abrir en otra app» → «Guardar en Archivos»', href: 'https://github.com/Leviidev/Husk' },
+      { label: 'Juegos Android en la nube', sub: 'now.gg (BlueStacks X) en Safari: sin instalar nada, pero solo los juegos de su catálogo', href: 'https://now.gg' },
       { label: 'Android en la nube', sub: 'Appetize.io: subes el .apk y lo usas en Safari. Gratis con minutos limitados (el archivo sale de tu iPhone)', href: 'https://appetize.io' },
       { label: 'Desde tu PC', sub: 'Instala el .apk en un emulador como BlueStacks y maneja el PC desde el iPhone con Escritorio remoto de Chrome', href: 'https://remotedesktop.google.com/access' },
     ],
