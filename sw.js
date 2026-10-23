@@ -1,6 +1,6 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v12';
+const CACHE = 'baul-v13';
 // Copia temporal de la app web que se está usando (la crea y la borra app.js).
 const RUN_CACHE = 'baul-run';
 const ASSETS = [

@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 
 /* ================= Utilidades ================= */
 
@@ -328,6 +328,18 @@ const GAME_BY_EXT = Object.fromEntries(Object.entries(GAME_SYSTEMS).flatMap(([ke
 // Formatos que pueden ser un juego (o no): se ofrece elegir la consola.
 const MAYBE_GAME_EXTS = new Set(['zip', '7z', 'rar', 'bin', 'iso', 'img', 'chd', 'cue']);
 const gameSystemOf = name => GAME_BY_EXT[extOf(name)];
+// Consolas que el Baúl reconoce (para decirlo claro) pero no puede emular.
+const OTHER_SYSTEMS = {
+  pce: 'PC Engine', sgx: 'PC Engine', a26: 'Atari 2600', a78: 'Atari 7800', lnx: 'Atari Lynx', '32x': 'Sega 32X',
+  ngp: 'Neo Geo Pocket', ngc: 'Neo Geo Pocket', wsc: 'WonderSwan', cso: 'PSP', nsp: 'Nintendo Switch', xci: 'Nintendo Switch',
+  gcm: 'GameCube', rvz: 'GameCube / Wii', wbfs: 'Wii', gdi: 'Dreamcast', cdi: 'Dreamcast',
+};
+// Archivos en los que se mira dentro para saber de qué consola son (también sin extensión, o un .md de Mega Drive).
+const DETECT_EXTS = new Set([...MAYBE_GAME_EXTS, 'rom', 'md', '']);
+// Juegos de .zip que no van con el emulador, sino con otro motor del Baúl.
+const PLAYABLE_KINDS = new Set(['dos', 'web', 'godot']);
+// La consola de un juego: la que se detectó mirando dentro o, si no, la de su extensión.
+const systemOf = meta => (GAME_SYSTEMS[meta.system] ? meta.system : gameSystemOf(meta.name));
 
 // Programas de MS-DOS: se ejecutan dentro del baúl con js-dos (DOSBox). Un .exe puede ser de MS-DOS o de Windows.
 const DOS_EXTS = new Set(['exe', 'com', 'bat', 'jsdos']);
@@ -362,7 +374,9 @@ function fileIcon(meta, big) {
   const icon = el('div', 'ficon' + (big ? ' big' : ''));
   const ext = extOf(meta.name);
   let [label, color] = FILE_STYLE[ext] || (CODE_EXTS.has(ext) ? ['</>', '#a3b8e8'] : [(ext || 'FILE').slice(0, 4).toUpperCase(), '']);
-  if (gameSystemOf(meta.name)) [label, color] = [GAME_SYSTEMS[gameSystemOf(meta.name)].label, '#b9c4ea'];
+  const system = systemOf(meta);
+  if (system) [label, color] = [GAME_SYSTEMS[system].label, '#b9c4ea'];
+  else if (meta.system === 'dos') [label, color] = ['DOS', '#b9c4ea'];
   if (meta.kind === 'audio') [label, color] = ['♪', '#c9b3e8'];
   if (meta.kind === 'video') [label, color] = ['▶', ''];
   if (meta.kind === 'image') [label, color] = ['IMG', ''];
@@ -777,6 +791,11 @@ async function ingestOne(file, { keepOriginal = false, added, originalSize, fold
     if (videoChoice.value === 'ask') { meta.vq = 'ask'; meta.batch = videoChoice.id; }
     else setVideoQuality(meta, videoChoice.value);
   }
+  // Juegos sin extensión clara (.zip, .bin, .iso…): se mira dentro para saber de qué consola son.
+  if (DETECT_EXTS.has(extOf(meta.name)) && !['image', 'video', 'audio', 'pdf'].includes(meta.kind)) {
+    const found = await detectGame(file, meta.name).catch(() => null);
+    if (found?.system || found?.kind) meta.system = found.system || found.kind;
+  }
   // Al cifrar se crea una copia propia: el archivo del selector de iOS es temporal.
   const sealed = await encryptBlob(file, masterKey);
   meta.storedSize = sealed.size;
@@ -988,15 +1007,36 @@ async function readZip(file) {
     const clen = cd.getUint16(p + 32, true);
     const localOffset = cd.getUint32(p + 42, true);
     const name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nlen));
+    const raw = async () => {
+      const lh = new DataView(await file.slice(localOffset, localOffset + 30).arrayBuffer());
+      const start = localOffset + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+      return file.slice(start, start + csize);
+    };
     entries.push({
-      name, encrypted: (flags & 1) === 1, method,
+      name, encrypted: (flags & 1) === 1, method, size: cd.getUint32(p + 24, true),
       async blob() {
-        const lh = new DataView(await file.slice(localOffset, localOffset + 30).arrayBuffer());
-        const start = localOffset + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
-        const raw = file.slice(start, start + csize);
-        if (method === 0) return raw;
-        if (method === 8 && canGzip) return streamBlob(raw, new DecompressionStream('deflate-raw'));
+        if (method === 0) return raw();
+        if (method === 8 && canGzip) return streamBlob(await raw(), new DecompressionStream('deflate-raw'));
         throw new Error('Formato de compresión no compatible');
+      },
+      // Solo el principio, sin descomprimir el resto: para ver qué es sin gastar memoria.
+      async head(n) {
+        if (method === 0) return new Uint8Array(await (await raw()).slice(0, n).arrayBuffer());
+        if (method !== 8 || !canGzip) throw new Error('Formato de compresión no compatible');
+        const reader = (await raw()).stream().pipeThrough(new DecompressionStream('deflate-raw')).getReader();
+        const out = new Uint8Array(n);
+        let got = 0;
+        try {
+          while (got < n) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            out.set(value.subarray(0, n - got), got);
+            got += Math.min(value.length, n - got);
+          }
+        } finally {
+          reader.cancel().catch(() => {});
+        }
+        return out.subarray(0, got);
       },
     });
     p += 46 + nlen + xlen + clen;
@@ -1051,7 +1091,7 @@ function matchesFilter(m) {
   if (state.filter === 'image') return m.kind === 'image';
   if (state.filter === 'video') return m.kind === 'video';
   if (state.filter === 'file') return m.kind !== 'image' && m.kind !== 'video';
-  if (state.filter === 'game') return !!gameSystemOf(m.name) || PROGRAM_EXTS.has(extOf(m.name));
+  if (state.filter === 'game') return !!systemOf(m) || PLAYABLE_KINDS.has(m.system) || PROGRAM_EXTS.has(extOf(m.name));
   return true;
 }
 
@@ -1699,7 +1739,8 @@ async function showItem(index) {
     const limit = 3_000_000;
     const text = await file.slice(0, limit).text();
     if (token !== view.token) return;
-    node = textView(text, meta, file.size > limit);
+    // Un .md puede ser una ROM de Mega Drive: si no es texto (lleva bytes a cero), se trata como un archivo más.
+    node = meta.system || text.slice(0, 65536).includes('\0') ? otherView(meta, file) : textView(text, meta, file.size > limit);
   } else {
     node = otherView(meta, file);
   }
@@ -1759,10 +1800,11 @@ function otherView(meta, file) {
     const play = el('button', 'play', 'Jugar');
     play.onclick = () => openGame(meta, system, file);
     box.append(play, el('div', 's', `Emulador de ${GAME_SYSTEMS[system].name}`));
-  } else if (MAYBE_GAME_EXTS.has(ext)) {
-    const play = el('button', 'open', 'Jugar con un emulador…');
-    play.onclick = () => chooseSystemAndPlay(meta, file);
-    box.append(play);
+  } else if (DETECT_EXTS.has(ext) || OTHER_SYSTEMS[ext] || meta.system) {
+    // Se mira dentro del archivo (sin descomprimirlo entero) para saber de qué consola es.
+    const slot = el('div', 's', 'Mirando de qué consola es…');
+    box.append(slot);
+    gameOf(meta, file).then(found => slot.replaceWith(...gameActions(meta, file, found)));
   }
   if (DOS_EXTS.has(ext)) {
     // Hay que mirar dentro del .exe para saber si es de MS-DOS o de Windows.
@@ -1830,6 +1872,538 @@ function otherView(meta, file) {
   return box;
 }
 
+/* ---- Juegos: de qué consola es (mirando dentro del archivo, no solo su nombre) ---- */
+
+const readBytes = async (blob, start, length) => new Uint8Array(await blob.slice(start, start + length).arrayBuffer());
+const asciiAt = (b, start, length) => String.fromCharCode(...b.subarray(start, start + length));
+const bytesAt = (b, start, sig) => sig.every((v, i) => b[start + i] === v);
+const u32le = (b, i) => (b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) >>> 0;
+const u32be = (b, i) => ((b[i] << 24) | (b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]) >>> 0;
+const MB = 1024 * 1024;
+
+// Logotipo de Nintendo que llevan todas las ROMs de Game Boy y de GBA / DS (solo hace falta el principio).
+const GB_LOGO = [0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83];
+const GBA_LOGO = [0x24, 0xFF, 0xAE, 0x51, 0x69, 0x9A, 0xA2, 0x21, 0x3D, 0x84, 0x82, 0x0A];
+
+// Super Nintendo: no tiene firma, pero sí una cabecera en 0x7FC0 (LoROM) o 0xFFC0 (HiROM), +512 si la copió un copiador.
+function isSnesRom(b, size) {
+  const copier = size % 1024 === 512 ? 512 : 0;
+  return [0x7FC0, 0xFFC0].some(base => {
+    const h = base + copier;
+    if (h + 0x20 > b.length) return false;
+    if ((b[h + 0x15] & 0xE0) !== 0x20 || b[h + 0x17] < 0x07 || b[h + 0x17] > 0x0D) return false;
+    const checksum = b[h + 0x1E] | (b[h + 0x1F] << 8);
+    const complement = b[h + 0x1C] | (b[h + 0x1D] << 8);
+    const title = b.subarray(h, h + 21);
+    return (checksum ^ complement) === 0xFFFF
+      || (title.every(c => (c >= 0x20 && c < 0x7F) || c >= 0xA0) && title.some(c => c !== 0x20));
+  });
+}
+
+// Cartuchos: cada consola deja su firma en la cabecera. `b` es el principio de la ROM (66 KB bastan).
+function cartridgeSystem(b, size) {
+  // Una ROM siempre tiene bytes a cero; un texto, nunca: así un README no pasa por un juego.
+  if (!b.includes(0)) return null;
+  if (bytesAt(b, 0, [0x4E, 0x45, 0x53, 0x1A]) || bytesAt(b, 0, [0x46, 0x44, 0x53, 0x1A])) return { system: 'nes' };
+  if ([[0x80, 0x37, 0x12, 0x40], [0x37, 0x80, 0x40, 0x12], [0x40, 0x12, 0x37, 0x80]].some(sig => bytesAt(b, 0, sig))) return { system: 'n64' };
+  if (bytesAt(b, 0xC0, GBA_LOGO) && b[0x15C] === 0x56 && b[0x15D] === 0xCF) return { system: 'nds' };
+  if (bytesAt(b, 0x04, GBA_LOGO) && b[0xB2] === 0x96) return { system: 'gba' };
+  if (bytesAt(b, 0x104, GB_LOGO)) return { system: 'gb' };
+  const sega = asciiAt(b, 0x100, 16);
+  if (sega.includes('SEGA')) return sega.includes('32X') ? { other: 'Sega 32X' } : { system: 'segaMD' };
+  if (b[8] === 0xAA && b[9] === 0xBB && b[10] === 0x06) return { system: 'segaMD' }; // .smd entrelazado
+  // Master System y Game Gear: «TMR SEGA»; el código de región dice cuál de las dos es.
+  for (const at of [0x7FF0, 0x3FF0, 0x1FF0]) {
+    if (asciiAt(b, at, 8) === 'TMR SEGA') return { system: b[at + 15] >> 4 >= 5 ? 'segaGG' : 'segaMS' };
+  }
+  if (isSnesRom(b, size)) return { system: 'snes' };
+  if (asciiAt(b, 0, 4) === 'LYNX') return { other: 'Atari Lynx' };
+  if (asciiAt(b, 1, 9) === 'ATARI7800') return { other: 'Atari 7800' };
+  if (/^( LICENSED|COPYRIGHT) BY SNK/.test(asciiAt(b, 0, 28))) return { other: 'Neo Geo Pocket' };
+  if (asciiAt(b, 0x100, 4) === 'NCSD') return { other: 'Nintendo 3DS' };
+  if (asciiAt(b, 0x100, 4) === 'HEAD' || asciiAt(b, 0, 4) === 'PFS0') return { other: 'Nintendo Switch' };
+  return null;
+}
+
+// Un archivo dentro de un disco ISO 9660 (para leer SYSTEM.CNF, que dice si es de PlayStation 1 o 2).
+async function isoFileText(read, sectorSize, dataOffset, pvd, wanted) {
+  const lba = u32le(pvd, 158), length = u32le(pvd, 166);
+  for (let s = 0; s * 2048 < Math.min(length, 8 * 2048); s++) {
+    const dir = await read((lba + s) * sectorSize + dataOffset, 2048);
+    for (let p = 0; p + 33 < dir.length && dir[p];) {
+      const name = asciiAt(dir, p + 33, dir[p + 32]).split(';')[0].toUpperCase();
+      if (name === wanted) {
+        const data = await read(u32le(dir, p + 2) * sectorSize + dataOffset, Math.min(u32le(dir, p + 10), 2048));
+        return new TextDecoder().decode(data);
+      }
+      p += dir[p];
+    }
+  }
+  return null;
+}
+
+// Discos: ISO 9660 en el sector 16, con sectores de 2048 bytes (.iso) o «en crudo» de 2352 (.bin).
+async function discSystem(read) {
+  for (const [sectorSize, dataOffset] of [[2048, 0], [2352, 24], [2352, 16]]) {
+    const pvd = await read(16 * sectorSize + dataOffset, 2048);
+    if (pvd.length < 190 || pvd[0] !== 1 || asciiAt(pvd, 1, 5) !== 'CD001') continue;
+    const id = asciiAt(pvd, 8, 32).trim();
+    if (id === 'PSP GAME') return { other: 'PSP' };
+    if (id !== 'PLAYSTATION') return null;
+    const cnf = await isoFileText(read, sectorSize, dataOffset, pvd, 'SYSTEM.CNF').catch(() => null);
+    return /BOOT2\s*=/.test(cnf || '') ? { other: 'PlayStation 2' } : { system: 'psx' };
+  }
+  return null;
+}
+
+// CHD (discos comprimidos): sus metadatos dicen si es un CD, un GD-ROM (Dreamcast) o un DVD.
+async function chdSystem(read, b) {
+  const version = u32be(b, 12);
+  const at = version >= 5 ? 48 : 36;
+  let offset = u32be(b, at) * 2 ** 32 + u32be(b, at + 4);
+  for (let i = 0; i < 16 && offset; i++) {
+    const entry = await read(offset, 16);
+    if (entry.length < 16) break;
+    const tag = asciiAt(entry, 0, 4);
+    if (tag === 'CHGD' || tag === 'CHGT') return { other: 'Dreamcast' };
+    if (tag === 'DVD ') return { other: 'PlayStation 2 u otra consola de DVD' };
+    if (/^CH(T2|TR|CD)$/.test(tag)) return { system: 'psx' };
+    offset = u32be(entry, 8) * 2 ** 32 + u32be(entry, 12);
+  }
+  return { system: 'psx' };
+}
+
+// De qué consola es una ROM o una imagen de disco. `read(inicio, largo)` lee del archivo.
+async function romSystem(read, size) {
+  const b = await read(0, 0x10400);
+  for (const at of [0, 0x10]) {
+    const id = asciiAt(b, at, 16);
+    if (id.startsWith('SEGADISCSYSTEM')) return { other: 'Mega CD' };
+    if (id.startsWith('SEGA SEGASATURN')) return { other: 'Sega Saturn' };
+    if (id.startsWith('SEGA SEGAKATANA')) return { other: 'Dreamcast' };
+  }
+  if (u32be(b, 0x1C) === 0xC2339F3D) return { other: 'GameCube' };
+  if (u32be(b, 0x18) === 0x5D1C9EA3) return { other: 'Wii' };
+  if (/^(WBFS|RVZ\x01|WIA\x01)/.test(asciiAt(b, 0, 4))) return { other: 'GameCube / Wii' };
+  if (asciiAt(b, 0x10000, 20) === 'MICROSOFT*XBOX*MEDIA') return { other: 'Xbox' };
+  if (asciiAt(b, 0, 8) === 'MComprHD') return chdSystem(read, b);
+  if (asciiAt(b, 0, 4) === '\0PBP') return { system: 'psx' };
+  return (await discSystem(read)) || cartridgeSystem(b, size);
+}
+
+/* Índice de un .7z: va al final del archivo y casi siempre comprimido con LZMA. Solo hacen falta los nombres. */
+
+// Descompresor LZMA (el del índice de los .7z), según la especificación de Igor Pavlov (LzmaSpec.cpp, dominio público).
+function lzmaDecode(input, props, outSize) {
+  const lc = props[0] % 9, lp = Math.floor(props[0] / 9) % 5, pb = Math.floor(props[0] / 45);
+  const out = new Uint8Array(outSize);
+  let inPos = 1, outPos = 0, range = 0xFFFFFFFF, code = 0;
+  const next = () => (inPos < input.length ? input[inPos++] : 0);
+  for (let i = 0; i < 4; i++) code = code * 256 + next();
+  const bit = (probs, i) => {
+    const p = probs[i], bound = (range >>> 11) * p;
+    let b;
+    if (code < bound) { range = bound; probs[i] = p + ((2048 - p) >> 5); b = 0; }
+    else { range -= bound; code -= bound; probs[i] = p - (p >> 5); b = 1; }
+    if (range < 0x1000000) { range *= 256; code = code * 256 + next(); }
+    return b;
+  };
+  const direct = n => {
+    let res = 0;
+    while (n--) {
+      range = Math.floor(range / 2);
+      const b = code >= range ? 1 : 0;
+      if (b) code -= range;
+      res = res * 2 + b;
+      if (range < 0x1000000) { range *= 256; code = code * 256 + next(); }
+    }
+    return res;
+  };
+  const probs = n => new Uint16Array(n).fill(1024);
+  const tree = (pr, base, bits) => { let m = 1; for (let i = 0; i < bits; i++) m = (m << 1) + bit(pr, base + m); return m - (1 << bits); };
+  const reverse = (pr, base, bits) => {
+    let m = 1, sym = 0;
+    for (let i = 0; i < bits; i++) { const b = bit(pr, base + m); m = (m << 1) + b; sym |= b << i; }
+    return sym;
+  };
+  const lenCoder = () => ({ choice: probs(2), low: probs(16 << 3), mid: probs(16 << 3), high: probs(256) });
+  const decodeLen = (c, posState) => (!bit(c.choice, 0) ? tree(c.low, posState << 3, 3)
+    : !bit(c.choice, 1) ? 8 + tree(c.mid, posState << 3, 3) : 16 + tree(c.high, 0, 8));
+  const literal = probs(0x300 << (lc + lp)), isMatch = probs(192), isRep = probs(12), isRepG0 = probs(12);
+  const isRepG1 = probs(12), isRepG2 = probs(12), isRep0Long = probs(192), posSlot = probs(4 << 6);
+  const posCoders = probs(115), align = probs(16), lenDec = lenCoder(), repLenDec = lenCoder();
+  let state = 0, rep0 = 0, rep1 = 0, rep2 = 0, rep3 = 0;
+  while (outPos < outSize) {
+    const posState = outPos & ((1 << pb) - 1);
+    if (!bit(isMatch, (state << 4) + posState)) {
+      const prev = outPos ? out[outPos - 1] : 0;
+      const base = 0x300 * (((outPos & ((1 << lp) - 1)) << lc) + (prev >> (8 - lc)));
+      let sym = 1;
+      if (state >= 7) {
+        let match = out[outPos - rep0 - 1];
+        while (sym < 0x100) {
+          const mb = (match >> 7) & 1;
+          match <<= 1;
+          const b = bit(literal, base + ((1 + mb) << 8) + sym);
+          sym = (sym << 1) | b;
+          if (mb !== b) break;
+        }
+      }
+      while (sym < 0x100) sym = (sym << 1) | bit(literal, base + sym);
+      out[outPos++] = sym - 0x100;
+      state = state < 4 ? 0 : state < 10 ? state - 3 : state - 6;
+      continue;
+    }
+    let len;
+    if (bit(isRep, state)) {
+      if (!outPos) throw new Error('Datos LZMA dañados');
+      if (!bit(isRepG0, state)) {
+        if (!bit(isRep0Long, (state << 4) + posState)) {
+          state = state < 7 ? 9 : 11;
+          out[outPos] = out[outPos - rep0 - 1];
+          outPos++;
+          continue;
+        }
+      } else {
+        let dist;
+        if (!bit(isRepG1, state)) dist = rep1;
+        else {
+          if (!bit(isRepG2, state)) dist = rep2;
+          else { dist = rep3; rep3 = rep2; }
+          rep2 = rep1;
+        }
+        rep1 = rep0;
+        rep0 = dist;
+      }
+      len = decodeLen(repLenDec, posState);
+      state = state < 7 ? 8 : 11;
+    } else {
+      rep3 = rep2; rep2 = rep1; rep1 = rep0;
+      len = decodeLen(lenDec, posState);
+      state = state < 7 ? 7 : 10;
+      const slot = tree(posSlot, Math.min(len, 3) << 6, 6);
+      if (slot < 4) rep0 = slot;
+      else {
+        const bits = (slot >> 1) - 1;
+        rep0 = (2 | (slot & 1)) * 2 ** bits;
+        if (slot < 14) rep0 += reverse(posCoders, rep0 - slot, bits);
+        else rep0 += direct(bits - 4) * 16 + reverse(align, 0, 4);
+      }
+      if (rep0 === 0xFFFFFFFF) break; // marca de fin
+      if (rep0 >= outPos) throw new Error('Datos LZMA dañados');
+    }
+    for (len += 2; len > 0 && outPos < outSize; len--, outPos++) out[outPos] = out[outPos - rep0 - 1];
+  }
+  return out;
+}
+
+function sevenReader(bytes) {
+  let p = 0;
+  const r = {
+    byte() {
+      if (p >= bytes.length) throw new Error('El índice del .7z está dañado.');
+      return bytes[p++];
+    },
+    // Números de 7-Zip: los bits altos del primer byte dicen cuántos bytes más siguen.
+    num() {
+      const first = r.byte();
+      let mask = 0x80, value = 0;
+      for (let i = 0; i < 8; i++) {
+        if (!(first & mask)) return value + (first & (mask - 1)) * 2 ** (8 * i);
+        value += r.byte() * 2 ** (8 * i);
+        mask >>= 1;
+      }
+      return value;
+    },
+    bytes(n) {
+      if (p + n > bytes.length) throw new Error('El índice del .7z está dañado.');
+      p += n;
+      return bytes.subarray(p - n, p);
+    },
+    rest: () => r.bytes(bytes.length - p),
+    bits(n) {
+      const out = [];
+      for (let i = 0, cur = 0; i < n; i++) {
+        if (i % 8 === 0) cur = r.byte();
+        out.push(!!(cur & (0x80 >> (i % 8))));
+      }
+      return out;
+    },
+  };
+  return r;
+}
+
+function sevenDigests(r, n) {
+  const defined = r.byte() ? new Array(n).fill(true) : r.bits(n);
+  for (const d of defined) if (d) r.bytes(4);
+  return defined;
+}
+
+function sevenFolder(r) {
+  const coders = [];
+  let ins = 0, outs = 0;
+  for (let n = r.num(); n > 0; n--) {
+    const flag = r.byte();
+    const id = [...r.bytes(flag & 0x0F)].map(x => x.toString(16).padStart(2, '0')).join('');
+    const complex = flag & 0x10 ? [r.num(), r.num()] : [1, 1];
+    const props = flag & 0x20 ? r.bytes(r.num()) : null;
+    coders.push({ id, props });
+    ins += complex[0];
+    outs += complex[1];
+  }
+  const bound = [];
+  for (let i = 1; i < outs; i++) { r.num(); bound.push(r.num()); }
+  if (ins - outs + 1 > 1) for (let i = ins - outs + 1; i > 0; i--) r.num();
+  return { coders, outs, bound, sizes: [], crc: false };
+}
+// Tamaño final de una carpeta de 7-Zip: el de la salida que no alimenta a otro filtro.
+const sevenFolderSize = f => f.sizes.find((_, i) => !f.bound.includes(i)) ?? 0;
+
+function sevenStreams(r) {
+  const info = { packPos: 0, packSizes: [], folders: [], fileSizes: null };
+  for (let id = r.num(); id !== 0; id = r.num()) {
+    if (id === 0x06) { // PackInfo
+      info.packPos = r.num();
+      const n = r.num();
+      for (let t = r.num(); t !== 0; t = r.num()) {
+        if (t === 0x09) for (let i = 0; i < n; i++) info.packSizes.push(r.num());
+        else if (t === 0x0A) sevenDigests(r, n);
+        else throw new Error('Índice del .7z no compatible');
+      }
+    } else if (id === 0x07) { // UnpackInfo
+      if (r.num() !== 0x0B) throw new Error('Índice del .7z no compatible');
+      const n = r.num();
+      if (r.byte()) throw new Error('Índice del .7z no compatible');
+      for (let i = 0; i < n; i++) info.folders.push(sevenFolder(r));
+      if (r.num() !== 0x0C) throw new Error('Índice del .7z no compatible');
+      for (const f of info.folders) for (let i = 0; i < f.outs; i++) f.sizes.push(r.num());
+      for (let t = r.num(); t !== 0; t = r.num()) {
+        if (t !== 0x0A) throw new Error('Índice del .7z no compatible');
+        sevenDigests(r, n).forEach((d, i) => { info.folders[i].crc = d; });
+      }
+    } else if (id === 0x08) { // SubStreamsInfo: cuántos archivos hay en cada carpeta y cuánto ocupa cada uno
+      const counts = info.folders.map(() => 1);
+      let t = r.num();
+      if (t === 0x0D) { counts.forEach((_, i) => { counts[i] = r.num(); }); t = r.num(); }
+      const sizes = [];
+      info.folders.forEach((f, i) => {
+        let sum = 0;
+        for (let j = 1; j < counts[i] && t === 0x09; j++) { const s = r.num(); sizes.push(s); sum += s; }
+        if (counts[i]) sizes.push(sevenFolderSize(f) - sum);
+      });
+      if (t === 0x09) t = r.num();
+      for (; t !== 0; t = r.num()) {
+        if (t !== 0x0A) throw new Error('Índice del .7z no compatible');
+        sevenDigests(r, info.folders.reduce((n, f, i) => n + (counts[i] !== 1 || !f.crc ? counts[i] : 0), 0));
+      }
+      info.fileSizes = sizes;
+    } else throw new Error('Índice del .7z no compatible');
+  }
+  info.fileSizes ??= info.folders.map(sevenFolderSize);
+  return info;
+}
+
+function sevenFilesInfo(r) {
+  const count = r.num();
+  if (count > 1e6) throw new Error('El índice del .7z está dañado.');
+  const files = Array.from({ length: count }, () => ({ name: '', empty: false, dir: false }));
+  for (let t = r.num(); t !== 0; t = r.num()) {
+    const p = sevenReader(r.bytes(r.num()));
+    if (t === 0x0E) p.bits(files.length).forEach((e, i) => { files[i].empty = e; files[i].dir = e; });
+    else if (t === 0x0F) {
+      const emptyFile = p.bits(files.filter(f => f.empty).length);
+      let k = 0;
+      for (const f of files) if (f.empty) f.dir = !emptyFile[k++];
+    } else if (t === 0x11 && !p.byte()) {
+      const names = new TextDecoder('utf-16le').decode(p.rest()).split('\0');
+      files.forEach((f, i) => { f.name = names[i] || ''; });
+    }
+  }
+  return files;
+}
+
+async function sevenZipFiles(file) {
+  const sig = await readBytes(file, 0, 32);
+  if (!bytesAt(sig, 0, [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])) throw new Error('No es un archivo .7z válido.');
+  const offset = 32 + u32le(sig, 12) + u32le(sig, 16) * 2 ** 32, size = u32le(sig, 20) + u32le(sig, 24) * 2 ** 32;
+  if (!size || size > 64 * MB || offset + size > file.size) throw new Error('El índice del .7z está dañado.');
+  let r = sevenReader(await readBytes(file, offset, size));
+  let id = r.num();
+  if (id === 0x17) { // índice comprimido
+    const info = sevenStreams(r);
+    const folder = info.folders[0];
+    if (!folder || folder.coders.length !== 1 || folder.coders[0].id !== '030101') throw new Error('Índice del .7z no compatible');
+    const packed = await readBytes(file, 32 + info.packPos, info.packSizes[0]);
+    r = sevenReader(lzmaDecode(packed, folder.coders[0].props, sevenFolderSize(folder)));
+    id = r.num();
+  }
+  if (id !== 0x01) throw new Error('Índice del .7z no compatible');
+  let sizes = [], files = [];
+  for (let t = r.num(); t !== 0; t = r.num()) {
+    if (t === 0x02) for (let p = r.num(); p !== 0; p = r.num()) r.bytes(r.num());
+    else if (t === 0x03) sevenStreams(r);
+    else if (t === 0x04) sizes = sevenStreams(r).fileSizes;
+    else if (t === 0x05) files = sevenFilesInfo(r);
+    else throw new Error('Índice del .7z no compatible');
+  }
+  let k = 0;
+  return files.map(f => ({ name: f.name, dir: f.dir, size: f.empty ? 0 : sizes[k++] ?? 0 }));
+}
+
+// Nombres y tamaños de lo que hay dentro de un .rar (RAR 4 y RAR 5), leyendo solo sus cabeceras.
+async function rarFiles(file) {
+  const sig = await readBytes(file, 0, 8);
+  const files = [];
+  if (asciiAt(sig, 0, 7) === 'Rar!\x1A\x07\x00') {
+    for (let p = 7, n = 0; p + 7 <= file.size && n < 5000; n++) {
+      const base = await readBytes(file, p, 11);
+      const type = base[2], flags = base[3] | (base[4] << 8), headSize = base[5] | (base[6] << 8);
+      if (headSize < 7) break;
+      if (type === 0x73 && flags & 0x80) throw new Error('El .rar tiene los nombres cifrados.');
+      if (type === 0x7B) break;
+      let data = flags & 0x8000 ? u32le(base, 7) : 0;
+      if (type === 0x74) {
+        const h = await readBytes(file, p, headSize);
+        const large = flags & 0x100;
+        data = u32le(h, 7) + (large ? u32le(h, 32) * 2 ** 32 : 0);
+        const nameAt = large ? 40 : 32;
+        const raw = h.subarray(nameAt, nameAt + (h[26] | (h[27] << 8)));
+        const zero = raw.indexOf(0);
+        files.push({
+          name: new TextDecoder().decode(zero >= 0 ? raw.subarray(0, zero) : raw).replaceAll('\\', '/'),
+          size: u32le(h, 11) + (large ? u32le(h, 36) * 2 ** 32 : 0),
+          dir: (flags & 0xE0) === 0xE0,
+        });
+      }
+      p += headSize + data;
+    }
+    return files;
+  }
+  if (asciiAt(sig, 0, 8) !== 'Rar!\x1A\x07\x01\x00') throw new Error('No es un archivo .rar válido.');
+  // RAR 5: cada bloque es CRC (4 bytes), tamaño de la cabecera, la cabecera y, si los hay, sus datos.
+  let q = 0;
+  const vint = buf => {
+    let value = 0, shift = 0, c;
+    do { c = buf[q++] ?? 0; value += (c & 0x7F) * 2 ** shift; shift += 7; } while (c & 0x80 && shift < 64);
+    return value;
+  };
+  for (let p = 8, n = 0; p < file.size && n < 5000; n++) {
+    q = 0;
+    const headSize = vint(await readBytes(file, p + 4, 4));
+    const sizeLength = q;
+    if (!headSize) break;
+    const block = await readBytes(file, p + 4 + sizeLength, headSize);
+    q = 0;
+    const type = vint(block), flags = vint(block);
+    if (flags & 1) vint(block);
+    const data = flags & 2 ? vint(block) : 0;
+    if (type === 4) throw new Error('El .rar tiene los nombres cifrados.');
+    if (type === 5) break;
+    if (type === 2) {
+      const fileFlags = vint(block), size = vint(block);
+      vint(block);
+      if (fileFlags & 2) q += 4;
+      if (fileFlags & 4) q += 4;
+      vint(block);
+      vint(block);
+      const nameLength = vint(block);
+      files.push({ name: new TextDecoder().decode(block.subarray(q, q + nameLength)), size, dir: !!(fileFlags & 1) });
+    }
+    p += 4 + sizeLength + headSize + data;
+  }
+  return files;
+}
+
+// Qué hay en un .zip, .7z o .rar con un juego. En los .zip se puede mirar el principio de cada archivo; en los
+// .7z y .rar solo los nombres y tamaños (mirar dentro obligaría a descomprimirlo entero).
+async function archiveGame(list) {
+  const files = list.filter(f => !f.dir && !f.encrypted && f.name && !f.name.endsWith('/'))
+    .map(f => ({ ...f, ext: extOf(f.name), base: f.name.split('/').pop().toLowerCase() }))
+    .sort((a, b) => b.size - a.size);
+  const rom = files.find(f => GAME_BY_EXT[f.ext]);
+  if (rom) return { system: GAME_BY_EXT[rom.ext] };
+  const unclear = files.filter(f => ['bin', 'iso', 'img', 'md', 'rom', 'chd', 'pbp', ''].includes(f.ext));
+  for (const f of unclear.slice(0, 3)) {
+    const head = f.head && await f.head(0x40000).catch(() => null);
+    const found = head && await romSystem(async (start, length) => head.subarray(start, start + length), f.size);
+    if (found) return found;
+  }
+  if (files.some(f => ['cue', 'm3u', 'ccd', 'chd', 'pbp'].includes(f.ext))) return { system: 'psx' };
+  const other = files.find(f => OTHER_SYSTEMS[f.ext]);
+  if (other) return { other: OTHER_SYSTEMS[other.ext] };
+  if (!files.length || !files[0].head) {
+    // Sin poder mirar dentro: un disco de PlayStation ocupa mucho más que un cartucho de Mega Drive.
+    const big = unclear[0];
+    if (big && big.ext !== 'md' && big.size > 16 * MB && big.size < 900 * MB) return { system: 'psx' };
+    if (big && /^(bin|md)$/.test(big.ext) && big.size >= 128 * 1024 && big.size <= 10 * MB) return { system: 'segaMD' };
+    return null;
+  }
+  // Juegos de PC y web: solo en .zip, que es lo que abren js-dos y el Baúl.
+  if (files.some(f => f.base === 'index.html')) return { kind: 'web' };
+  if (files.some(f => f.ext === 'pck' || f.base === 'project.binary')) return { kind: 'godot' };
+  const programs = files.filter(f => ['exe', 'com', 'bat'].includes(f.ext));
+  if (programs.some(f => f.ext !== 'exe')) return { kind: 'dos' };
+  for (const f of programs.slice(0, 5)) {
+    const head = await f.head(0x10000).catch(() => null);
+    if (head && isDosHeader(head, f.size)) return { kind: 'dos' };
+  }
+  return null;
+}
+
+// De qué es un juego guardado: { system } (una consola del emulador), { kind: 'dos' | 'web' | 'godot' } (otros
+// motores del Baúl), { other } (una consola que el Baúl no emula) o { hint } (falta algo para jugarlo). null si no se sabe.
+async function detectGame(file, name) {
+  const ext = extOf(name);
+  if (GAME_BY_EXT[ext]) return { system: GAME_BY_EXT[ext] };
+  if (OTHER_SYSTEMS[ext]) return { other: OTHER_SYSTEMS[ext] };
+  if (ext === 'zip') return archiveGame(await readZip(file));
+  if (ext === '7z') return archiveGame(await sevenZipFiles(file));
+  if (ext === 'rar') return archiveGame(await rarFiles(file));
+  if (ext === 'cue' || ext === 'm3u') return { hint: `Un .${ext} solo es la lista de pistas: para jugarlo, mete el .${ext} y sus archivos (.bin) en un mismo .zip.` };
+  return romSystem((start, length) => readBytes(file, start, length), file.size);
+}
+
+// Lo detectado se recuerda (cifrado, con el resto de datos del archivo) para su icono y el filtro «Juegos».
+async function gameOf(meta, file) {
+  if (GAME_SYSTEMS[meta.system]) return { system: meta.system };
+  if (PLAYABLE_KINDS.has(meta.system)) return { kind: meta.system };
+  const found = await detectGame(file, meta.name).catch(() => null);
+  const key = found?.system || found?.kind;
+  const current = state.items.find(m => m.id === meta.id);
+  // Si aún se está comprimiendo, no se toca: lo guardará el compresor (y se detectará otra vez al abrirlo).
+  if (key && current && !current.status && !locked) {
+    current.system = key;
+    saveMeta(current).then(renderSoon, () => {});
+  }
+  return found;
+}
+
+// Botones del visor según lo detectado.
+function gameActions(meta, file, found) {
+  const ext = extOf(meta.name);
+  const choose = label => {
+    const b = el('button', 'open', label);
+    b.onclick = () => chooseSystemAndPlay(meta, file);
+    return b;
+  };
+  if (found?.system) {
+    const play = el('button', 'play', 'Jugar');
+    play.onclick = () => openGame(meta, found.system, file);
+    return [play, el('div', 's', `Emulador de ${GAME_SYSTEMS[found.system].name} · detectado automáticamente`), choose('Elegir otra consola')];
+  }
+  if (found?.kind) {
+    const run = el('button', 'play', 'Ejecutar');
+    run.onclick = () => (found.kind === 'dos' ? openDos(meta, file) : found.kind === 'web' ? openWebApp(meta, file) : openGodotZip(meta, file));
+    const what = { dos: 'Programa de MS-DOS', web: 'Juego web (HTML5)', godot: 'Juego hecho con Godot' }[found.kind];
+    return [run, el('div', 's', `${what} · se abre aquí mismo`)];
+  }
+  const out = [];
+  if (found?.other) out.push(el('p', 'why', `Es un juego de ${found.other}: el Baúl no tiene emulador para esa consola.`));
+  if (found?.hint) out.push(el('p', 'why', found.hint));
+  if (MAYBE_GAME_EXTS.has(ext)) out.push(choose(found?.other ? 'Elegir la consola a mano' : 'Jugar con un emulador…'));
+  return out;
+}
+
 /* ---- Juegos: emulador integrado ---- */
 
 const emu = $('#emu');
@@ -1850,10 +2424,18 @@ async function chooseSystemAndPlay(meta, file) {
   else if (system) openGame(meta, system, file);
 }
 
-function openGame(meta, system, file) {
+async function openGame(meta, system, file) {
+  // La extensión importa (el núcleo de Sega elige entre Mega Drive, Master System y Game Gear por ella): si el
+  // archivo no trae la de su consola (una ROM sin extensión, un .bin de Master System…), se le pone la suya.
+  let ext = extOf(meta.name);
+  const keep = GAME_SYSTEMS[system].exts.includes(ext) || ['zip', '7z', 'rar'].includes(ext)
+    || (system === 'psx' && ['bin', 'iso', 'img', 'chd', 'cue'].includes(ext)) || (system === 'segaMD' && ext === 'bin');
+  if (!keep) {
+    const magic = asciiAt(await readBytes(file, 0, 8), 0, 8);
+    ext = magic === 'MComprHD' ? 'chd' : magic.startsWith('\0PBP') ? 'pbp' : system === 'psx' ? 'bin' : GAME_SYSTEMS[system].exts[0];
+  }
   // El emulador guarda sus partidas con este nombre: un identificador, para no dejar el nombre del juego sin cifrar.
-  const gameName = `${meta.id}.${extOf(meta.name) || 'rom'}`;
-  openPlayer(meta, 'emulator.html', { type: 'start', core: system, game: file, name: gameName });
+  openPlayer(meta, 'emulator.html', { type: 'start', core: system, game: file, name: `${meta.id}.${ext}` });
 }
 
 // Abre un emulador (página aislada) a pantalla completa y le pasa el juego cuando está listo.
@@ -1930,17 +2512,20 @@ const clearGameSaves = () => Promise.all([
 const ANDROID_EXTS = new Set(['apk', 'xapk', 'apks', 'aab']);
 
 // Un .exe de Windows lleva la firma «PE» (o «NE» si es de Windows 3.x) tras la cabecera de MS-DOS.
-async function isDosProgram(meta, file) {
-  const ext = extOf(meta.name);
-  if (ext !== 'exe') return DOS_EXTS.has(ext);
-  const head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+// `head`: el principio del .exe (64 KB bastan); `size`: lo que ocupa entero.
+function isDosHeader(head, size) {
   const mz = (head[0] === 0x4d && head[1] === 0x5a) || (head[0] === 0x5a && head[1] === 0x4d);
   if (!mz || head.length < 28) return false;
   if (head.length < 64) return true;
-  const next = new DataView(head.buffer).getUint32(0x3c, true);
-  if (next < 64 || next + 2 > file.size) return true;
-  const sig = String.fromCharCode(...new Uint8Array(await file.slice(next, next + 2).arrayBuffer()));
+  const next = u32le(head, 0x3c);
+  if (next < 64 || next + 2 > size || next + 2 > head.length) return true;
+  const sig = asciiAt(head, next, 2);
   return sig !== 'PE' && sig !== 'NE';
+}
+async function isDosProgram(meta, file) {
+  const ext = extOf(meta.name);
+  if (ext !== 'exe') return DOS_EXTS.has(ext);
+  return isDosHeader(await readBytes(file, 0, 0x10000), file.size);
 }
 
 // Nombres al estilo de MS-DOS (8.3): «Mi Juego.exe» → «MIJUEGO.EXE».
