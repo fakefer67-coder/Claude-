@@ -5,17 +5,20 @@ Todo se queda dentro del iPhone: no se sube nada a ningún servidor.
 
 ## Qué hace
 
-- **Añadir**: fotos y vídeos de la Fototeca, fotos con la cámara o cualquier archivo de la app Archivos (PDF, Word, textos…), varios a la vez.
+- **Guarda sin esperar**: al elegir archivos se guardan al instante (cifrados) y aparecen en la cuadrícula; la compresión se hace después, en segundo plano, mientras sigues usando la app. Si sales o apagas el móvil, lo ya guardado está a salvo y la compresión continúa sola la próxima vez que abras el Baúl.
+- **Cualquier tipo de archivo**: fotos, vídeos, audio, PDF, Word/Excel, ZIP, textos, JSON, CSV, código… Los textos y JSON se ven dentro de la app (el JSON, ordenado y con colores) y se pueden copiar.
+- **Carpetas**: crea carpetas (y carpetas dentro de carpetas), mueve archivos entre ellas, renómbralas o bórralas. La búsqueda y los filtros buscan dentro de la carpeta abierta y todas sus subcarpetas. Desliza desde el borde izquierdo para volver atrás.
 - **Compresión automática**:
   - Fotos: se optimizan a la resolución de la pantalla del iPhone (2560 px, calidad 82 %). Se ven nítidas y ocupan un 70–90 % menos. En Ajustes puedes elegir *Ahorro máximo* o *Original*.
   - Documentos y textos: compresión **sin pérdidas** (gzip). Al abrirlos son idénticos al original.
   - Vídeos: se guardan tal cual (ya vienen comprimidos por el iPhone).
   - Las fotos con transparencia y los GIF animados no se tocan.
-- **Código de acceso**: al abrirla pide un código de 6 números. Todo se guarda cifrado (AES-256) con él, incluidos los nombres de los archivos. Se bloquea sola al salir (al momento, tras 1 minuto o tras 5, a elegir) y con el candado de arriba. Tras 5 intentos fallidos hay que esperar. Si olvidas el código, los archivos no se pueden recuperar: solo queda borrar el baúl y empezar de cero.
+- **Código de acceso con candado animado**: al abrirla pide un código de 6 números; al acertarlo, el candado se abre y entras al baúl. Todo se guarda cifrado (AES-256) con él, incluidos los nombres de archivos y carpetas. Se bloquea sola al salir (al momento, tras 1 minuto o tras 5, a elegir) y con el candado de arriba. Tras 5 intentos fallidos hay que esperar. Si olvidas el código, los archivos no se pueden recuperar: solo queda borrar el baúl y empezar de cero.
 - **Visor**: fotos con pellizcar/doble toque para ampliar, deslizar para pasar y hacia abajo para cerrar; vídeos, audio, PDF y textos.
-- **Guardar en otra app**: el botón *Guardar / Compartir* abre el menú de iOS (Guardar en Fotos, Guardar en Archivos, WhatsApp, Mail…). También para varios archivos a la vez con *Seleccionar*.
-- **No se pierde nada** al cerrar la app, cambiar de app o apagar el iPhone: los archivos quedan guardados en el almacenamiento del teléfono.
-- **Copia de seguridad**: Ajustes → *Exportar todo (.zip)* para guardarla en Archivos/iCloud Drive, y *Restaurar desde una copia* para recuperarla (no duplica lo que ya está). La copia va cifrada: para restaurarla pide el código que tenías al hacerla.
+- **Guardar en otra app**: el botón *Guardar* abre el menú de iOS (Guardar en Fotos, Guardar en Archivos, WhatsApp, Mail…). También para varios archivos a la vez con *Seleccionar*.
+- **Copia de seguridad**: Ajustes → *Exportar todo (.zip)* para guardarla en Archivos/iCloud Drive, y *Restaurar desde una copia* para recuperarla (incluye las carpetas y no duplica lo que ya está). La copia va cifrada: para restaurarla pide el código que tenías al hacerla.
+
+> iOS no deja que ninguna web app trabaje con la app cerrada o el móvil apagado. Por eso el Baúl guarda primero (rápido) y comprime después: lo guardado nunca se pierde, y lo que queda por comprimir se termina al volver. Si cierras la app justo mientras se está copiando un archivo muy grande, ese archivo concreto habrá que añadirlo otra vez.
 
 ## Ponerla en tu iPhone
 
@@ -43,4 +46,6 @@ La app es una web instalable (PWA): se publica una vez y se instala desde Safari
 
 Requisitos: iOS 16.4 o superior (para la compresión sin pérdidas; en versiones anteriores funciona pero sin comprimir documentos).
 
-Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v2`) para que los iPhone descarguen la actualización.
+Para publicar una versión nueva, cambia `CACHE` en `sw.js` (por ejemplo `baul-v4`). La app instalada se actualiza sola la próxima vez que se abre con internet.
+
+> El icono de la pantalla de inicio lo guarda iOS al instalar la app. Para ver un icono nuevo hay que quitar el Baúl de la pantalla de inicio y volver a añadirlo, y **quitarlo borra sus archivos**: exporta antes una copia de seguridad y restáurala después.
