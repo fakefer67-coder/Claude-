@@ -23,7 +23,7 @@ La app es una web instalable (PWA): se publica una vez y se instala desde Safari
 1. **Publicarla con GitHub Pages** (gratis):
    - GitHub Pages en repositorios privados necesita GitHub Pro. Con cuenta gratuita, haz el repositorio público
      (*Settings → General → Change visibility → Public*). Solo es público el código de la app; tus archivos nunca salen del iPhone.
-   - *Settings → Pages → Build and deployment → Source: Deploy from a branch*, elige la rama `claude/baul-app` (o `main` si la fusionas) y la carpeta `/ (root)`, y pulsa *Save*.
+   - *Settings → Pages → Build and deployment → Source: Deploy from a branch*, elige la rama `main` y la carpeta `/ (root)`, y pulsa *Save*.
    - En 1–2 minutos estará en `https://fakefer67-coder.github.io/Claude-/`.
 2. **Instalarla**: abre esa dirección en **Safari** en el iPhone → botón Compartir → **Añadir a pantalla de inicio**.
 3. Ábrela desde el icono **Baúl**. La primera vez necesita internet; a partir de ahí funciona en modo avión.
