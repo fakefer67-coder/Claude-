@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.9.2';
+const APP_VERSION = '2.9.3';
 
 /* ================= Utilidades ================= */
 
@@ -4072,6 +4072,9 @@ $('#hintClose').addEventListener('click', () => {
   $('#installHint').hidden = true;
   prefs.set('baul.hintClosed', '1');
 });
+
+// La versión, a la vista en la pantalla del código: así se sabe si ya llegó la nueva sin tener que entrar.
+$('#lockVersion').textContent = `Baúl ${APP_VERSION}`;
 
 if ('serviceWorker' in navigator) {
   const hadController = !!navigator.serviceWorker.controller;

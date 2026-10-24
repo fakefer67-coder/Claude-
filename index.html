@@ -380,6 +380,8 @@
     .keypad .kp-text:active { background: none; opacity: .5; }
     .keypad.wait { opacity: .28; pointer-events: none; }
     .lock-link { margin-top: 24px; color: var(--text-2); font-size: 14.5px; }
+    .lock-version { margin: 18px 0 0; color: var(--muted); font-size: 11.5px; letter-spacing: .02em; opacity: .75; transition: opacity .3s ease; }
+    .lock.unlocking .lock-version { opacity: 0; }
     .lock .lock-hint { margin-top: 18px; padding: 11px 14px; border-radius: 12px; background: var(--fill); color: var(--text-2); font-size: 12.5px; line-height: 1.45; box-shadow: inset 0 0 0 .5px var(--line-2); }
     @media (max-height: 700px) {
       .lock-mark { width: 84px; height: 84px; margin-bottom: 14px; }
@@ -551,6 +553,7 @@
       </div>
       <button id="lockForgot" class="lock-link" hidden>¿Olvidaste el código?</button>
       <p id="lockHint" class="lock-hint" hidden>Consejo: instala primero el Baúl (Compartir → «Añadir a pantalla de inicio») y crea el código desde su icono. Lo que guardes en esta pestaña de Safari no aparecerá en la app instalada.</p>
+      <p id="lockVersion" class="lock-version"></p>
     </div>
   </section>
   <div id="cover" class="cover" hidden><svg viewBox="0 0 60 70" style="color: #e7e7ea"><use href="#padlockShape"/></svg></div>
