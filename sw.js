@@ -1,6 +1,6 @@
 // Guarda la app en el iPhone para que abra sin internet.
 // Cambia CACHE al publicar una versión nueva.
-const CACHE = 'baul-v14';
+const CACHE = 'baul-v15';
 // Copia temporal de la app web que se está usando (la crea y la borra app.js).
 const RUN_CACHE = 'baul-run';
 // Emuladores y librerías: van aparte y sobreviven a las actualizaciones de la app.
@@ -24,12 +24,15 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  // `reload` evita copiar versiones viejas de la caché HTTP.
-  e.waitUntil(
-    caches.open(CACHE)
-      .then(c => c.addAll(ASSETS.map(url => new Request(url, { cache: 'reload' }))))
-      .then(() => self.skipWaiting()),
-  );
+  // `reload` evita copiar versiones viejas de la caché HTTP. Con datos móviles una descarga puede fallar: lo
+  // imprescindible (la portada y la app) tiene que estar; el resto se baja después, cuando se use.
+  e.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    const get = url => cache.add(new Request(url, { cache: 'reload' }));
+    await Promise.all(['./', './index.html', './app.js'].map(get));
+    await Promise.all(ASSETS.slice(3).map(url => get(url).catch(() => {})));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', e => {
@@ -88,13 +91,16 @@ self.addEventListener('fetch', e => {
   e.waitUntil(network);
 
   e.respondWith((async () => {
-    const cached = await caches.match(req, { ignoreSearch: true });
+    // Solo de la caché de esta versión: si una actualización anterior se cortó a medias, su caché vieja no tapa
+    // la app nueva.
+    const cache = await caches.open(CACHE);
+    const cached = await cache.match(req, { ignoreSearch: true });
     if (cached) return cached;
     const res = await network;
     if (res) return res;
     // Sin conexión: la portada de la app sirve para cualquier ruta suya, pero no para otras páginas (p. ej. el emulador).
     const isAppShell = req.mode === 'navigate' && new URL(self.registration.scope).pathname === url.pathname.replace(/index\.html$/, '');
-    return (isAppShell && await caches.match('./index.html')) || new Response('Sin conexión', { status: 503 });
+    return (isAppShell && await cache.match('./index.html')) || new Response('Sin conexión', { status: 503 });
   })());
 });
 

@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.9.1';
+const APP_VERSION = '2.9.2';
 
 /* ================= Utilidades ================= */
 
@@ -4075,7 +4075,10 @@ $('#hintClose').addEventListener('click', () => {
 
 if ('serviceWorker' in navigator) {
   const hadController = !!navigator.serviceWorker.controller;
-  navigator.serviceWorker.register('./sw.js').catch(err => console.warn('Sin modo offline:', err));
+  // Cada vez que se abre se mira si hay versión nueva, sin fiarse de la caché del navegador.
+  navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+    .then(reg => reg.update().catch(() => {}))
+    .catch(err => console.warn('Sin modo offline:', err));
   // Hay una versión nueva de la app: se carga sola en cuanto no moleste.
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!hadController) return;
