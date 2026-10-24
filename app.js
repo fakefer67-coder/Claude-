@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '2.9.3';
+const APP_VERSION = '2.9.4';
 
 /* ================= Utilidades ================= */
 
@@ -336,8 +336,8 @@ const OTHER_SYSTEMS = {
 };
 // Archivos en los que se mira dentro para saber de qué consola son (también sin extensión, o un .md de Mega Drive).
 const DETECT_EXTS = new Set([...MAYBE_GAME_EXTS, 'rom', 'md', '']);
-// Juegos de .zip que no van con el emulador, sino con otro motor del Baúl.
-const PLAYABLE_KINDS = new Set(['dos', 'web', 'godot']);
+// Juegos de .zip que no van con el emulador, sino con otro motor del Baúl (o un juego de Android dentro).
+const PLAYABLE_KINDS = new Set(['dos', 'web', 'godot', 'android']);
 // La consola de un juego: la que se detectó mirando dentro o, si no, la de su extensión.
 const systemOf = meta => (GAME_SYSTEMS[meta.system] ? meta.system : gameSystemOf(meta.name));
 
@@ -377,6 +377,7 @@ function fileIcon(meta, big) {
   const system = systemOf(meta);
   if (system) [label, color] = [GAME_SYSTEMS[system].label, '#b9c4ea'];
   else if (meta.system === 'dos') [label, color] = ['DOS', '#b9c4ea'];
+  else if (meta.system === 'android') [label, color] = ['APK', '#a6d4b9'];
   if (meta.kind === 'audio') [label, color] = ['♪', '#c9b3e8'];
   if (meta.kind === 'video') [label, color] = ['▶', ''];
   if (meta.kind === 'image') [label, color] = ['IMG', ''];
@@ -1828,23 +1829,7 @@ function otherView(meta, file) {
       }
     });
   }
-  if (ANDROID_EXTS.has(ext)) {
-    // Hay que mirar dentro del .apk: si es una app web (HTML5) se abre aquí mismo.
-    const slot = el('div');
-    box.append(slot);
-    inspectApp(meta, file).catch(() => ({})).then(info => {
-      if (info.page || info.godot || info.renpy || info.love || info.flash) {
-        const run = el('button', 'play', 'Ejecutar');
-        run.onclick = () => (info.godot ? openGodot(meta, info) : info.renpy ? openRenpy(meta, info)
-          : info.love ? openLove(meta, info) : info.flash ? openFlash(meta, info) : openWebApp(meta, file, info));
-        const what = info.godot ? `Juego hecho con Godot ${info.version}` : info.renpy ? `Novela visual hecha con Ren'Py ${info.version}`
-          : info.love ? 'Juego hecho con LÖVE' : info.flash ? 'Juego de Adobe AIR (Flash), experimental' : 'App web (HTML5)';
-        slot.replaceWith(run, el('div', 's', `${what} · se abre aquí mismo`));
-      } else {
-        slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
-      }
-    });
-  }
+  if (ANDROID_EXTS.has(ext)) box.append(androidActions(meta, file));
   if (ext === 'swf' || ext === 'love') {
     const run = el('button', 'play', 'Ejecutar');
     run.onclick = () => (ext === 'swf' ? openFlash(meta, { swf: file }) : openLove(meta, { love: file }));
@@ -2338,6 +2323,8 @@ async function archiveGame(list) {
     if (big && /^(bin|md)$/.test(big.ext) && big.size >= 128 * 1024 && big.size <= 10 * MB) return { system: 'segaMD' };
     return null;
   }
+  // Un juego de Android: el .apk dentro del .zip (o la app ya descomprimida).
+  if (files.some(f => /^(apk|xapk|apks)$/.test(f.ext) || f.base === 'androidmanifest.xml')) return { kind: 'android' };
   // Juegos de PC y web: solo en .zip, que es lo que abren js-dos y el Baúl.
   if (files.some(f => f.base === 'index.html')) return { kind: 'web' };
   if (files.some(f => f.ext === 'pck' || f.base === 'project.binary')) return { kind: 'godot' };
@@ -2381,9 +2368,9 @@ async function gameOf(meta, file) {
 // Botones del visor según lo detectado.
 function gameActions(meta, file, found) {
   const ext = extOf(meta.name);
-  const choose = label => {
+  const choose = (label, note) => {
     const b = el('button', 'open', label);
-    b.onclick = () => chooseSystemAndPlay(meta, file);
+    b.onclick = () => chooseSystemAndPlay(meta, file, note);
     return b;
   };
   if (found?.system) {
@@ -2391,6 +2378,7 @@ function gameActions(meta, file, found) {
     play.onclick = () => openGame(meta, found.system, file);
     return [play, el('div', 's', `Emulador de ${GAME_SYSTEMS[found.system].name} · detectado automáticamente`), choose('Elegir otra consola')];
   }
+  if (found?.kind === 'android') return [androidActions(meta, file)];
   if (found?.kind) {
     const run = el('button', 'play', 'Ejecutar');
     run.onclick = () => (found.kind === 'dos' ? openDos(meta, file) : found.kind === 'web' ? openWebApp(meta, file) : openGodotZip(meta, file));
@@ -2400,8 +2388,30 @@ function gameActions(meta, file, found) {
   const out = [];
   if (found?.other) out.push(el('p', 'why', `Es un juego de ${found.other}: el Baúl no tiene emulador para esa consola.`));
   if (found?.hint) out.push(el('p', 'why', found.hint));
-  if (MAYBE_GAME_EXTS.has(ext)) out.push(choose(found?.other ? 'Elegir la consola a mano' : 'Jugar con un emulador…'));
+  if (MAYBE_GAME_EXTS.has(ext)) {
+    out.push(choose(found?.other ? 'Elegir la consola a mano' : 'Jugar con un emulador…',
+      found ? '' : 'No he reconocido ningún juego de consola dentro de este archivo: elige una solo si sabes de cuál es. ',
+    ));
+  }
   return out;
+}
+
+// Un juego de Android (.apk, o un .zip que lo lleva dentro): hay que mirar con qué está hecho para saber si se abre aquí.
+function androidActions(meta, file) {
+  const slot = el('div', 's', 'Mirando con qué está hecho…');
+  inspectApp(meta, file).catch(() => ({})).then(info => {
+    if (info.page || info.godot || info.renpy || info.love || info.flash) {
+      const run = el('button', 'play', 'Ejecutar');
+      run.onclick = () => (info.godot ? openGodot(meta, info) : info.renpy ? openRenpy(meta, info)
+        : info.love ? openLove(meta, info) : info.flash ? openFlash(meta, info) : openWebApp(meta, file, info));
+      const what = info.godot ? `Juego hecho con Godot ${info.version}` : info.renpy ? `Novela visual hecha con Ren'Py ${info.version}`
+        : info.love ? 'Juego hecho con LÖVE' : info.flash ? 'Juego de Adobe AIR (Flash), experimental' : 'App web (HTML5)';
+      slot.replaceWith(run, el('div', 's', `${what} · se abre aquí mismo`));
+    } else {
+      slot.replaceWith(el('p', 'why', nativeApkReason(info.engine)), waysButton('android'));
+    }
+  });
+  return slot;
 }
 
 /* ---- Juegos: emulador integrado ---- */
@@ -2409,7 +2419,7 @@ function gameActions(meta, file, found) {
 const emu = $('#emu');
 let emuSession = null;
 
-async function chooseSystemAndPlay(meta, file) {
+async function chooseSystemAndPlay(meta, file, note = '') {
   const options = Object.entries(GAME_SYSTEMS).map(([key, s]) => ({ label: s.name, value: key }));
   if (extOf(meta.name) === 'zip') {
     options.push({ label: 'PC antiguo (MS-DOS)', sub: 'Juegos y programas de antes de Windows 95', value: 'dos' });
@@ -2417,7 +2427,7 @@ async function chooseSystemAndPlay(meta, file) {
     options.push({ label: 'Juego hecho con Godot', sub: 'Un .zip con el .pck (o el .exe) del juego', value: 'godot' });
   }
   const system = await menu('¿De qué sistema es el juego?', options,
-    'Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.');
+    `${note}Los .zip o .7z con el juego dentro también valen. Para PlayStation, mete el .cue y el .bin en un mismo .zip.`);
   if (system === 'dos') openDos(meta, file);
   else if (system === 'web') openWebApp(meta, file);
   else if (system === 'godot') openGodotZip(meta, file);
